@@ -1,0 +1,75 @@
+# ============================================================================
+# AI-IDS .gitignore
+# ============================================================================
+
+# --- Secrets & Credentials ---
+.env
+.env.*
+!.env.example
+
+# --- Database (213 MB — NEVER commit) ---
+data/ai_ids.db
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# --- ML Models (bundled: pre-trained artifacts are committed to the repo) ---
+models/*.pkl
+models/*.npy
+models/*.h5
+models/*.pt
+models/*.onnx
+models/*.bin
+!models/.gitkeep
+!models/*.joblib
+!models/*.meta.json
+!models/models_evaluation_results.json
+
+# --- Coverage & Test Artifacts ---
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# --- Logs (14 MB — generated at runtime) ---
+logs/*.log
+logs/*.log.*
+!logs/.gitkeep
+
+# --- Temp Test Output Files ---
+_nfr_failures.txt
+_nfr3_failures.txt
+_nfr4_failures.txt
+_test_full.txt
+_test_summary.txt
+test_output.txt
+
+# --- OS & IDE ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.tmp
+
+# --- Python Virtual Environments ---
+venv/
+.venv/
+env/
+
+# --- Generated Documentation (broken script) ---
+generate_architecture_docx.py
+
+# --- Temporary directories ---
+tmp/
+tmp_pytest/

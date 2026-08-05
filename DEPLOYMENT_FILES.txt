@@ -1,0 +1,294 @@
+# ============================================================================
+# AI-IDS - Deployment File Manifest
+# ============================================================================
+# This file lists ALL files and directories required to run the project
+# on a new machine. Copy only the items listed below.
+#
+# Usage:
+#   1. Copy this entire project folder (excluding items marked [EXCLUDE])
+#   2. Install dependencies: pip install -r requirements.txt
+#   3. Copy .env.example to .env and configure it
+#   4. Run: streamlit run app.py
+# ============================================================================
+
+
+# ============================================================================
+# ENTRY POINTS (Required)
+# ============================================================================
+app.py                                    # Streamlit web UI entry point
+cli.py                                    # CLI / Interactive menu entry point
+
+
+# ============================================================================
+# CONFIGURATION (Required)
+# ============================================================================
+.env.example                              # Environment variable template
+requirements.txt                          # Python dependencies
+pytest.ini                                # Pytest configuration (for tests)
+
+config/__init__.py
+config/settings.py                        # Centralized Settings reader
+config/constants.py                       # Enums, table names, defaults
+
+
+# ============================================================================
+# CORE DOMAIN (Required - all files)
+# ============================================================================
+core/__init__.py
+core/exceptions.py                        # Custom exception hierarchy
+
+core/entities/__init__.py
+core/entities/alert.py
+core/entities/detection.py
+core/entities/ip_list_entry.py
+core/entities/log_entry.py
+core/entities/model_record.py
+core/entities/setting.py
+core/entities/system_metric.py
+core/entities/user.py
+
+core/interfaces/__init__.py
+core/interfaces/repository.py             # IRepository ABC
+core/interfaces/security.py               # IPasswordHasher ABC
+
+
+# ============================================================================
+# DATABASE LAYER (Required - all files)
+# ============================================================================
+database/__init__.py
+database/connection.py                    # SQLite thread-local connection
+database/schema.py                        # Table DDL + initialize()
+database/bootstrap.py                     # DB init + seed admin user
+
+database/migrations/.gitkeep
+database/migrations/fix_model_paths.py
+
+
+# ============================================================================
+# INFRASTRUCTURE (Required - all files)
+# ============================================================================
+infrastructure/__init__.py
+
+infrastructure/logging/__init__.py
+infrastructure/logging/logger_factory.py  # Rotating file + console logger
+
+infrastructure/notifications/__init__.py
+infrastructure/notifications/telegram_notifier.py  # Telegram Bot alerts
+
+infrastructure/security/__init__.py
+infrastructure/security/password_hasher.py  # BcryptPasswordHasher
+
+
+# ============================================================================
+# REPOSITORIES (Required - all files)
+# ============================================================================
+repositories/__init__.py
+repositories/base_repository.py           # BaseSQLiteRepository
+repositories/alert_repository.py
+repositories/blacklist_repository.py
+repositories/detection_repository.py
+repositories/log_repository.py
+repositories/model_repository.py
+repositories/system_metric_repository.py
+repositories/user_repository.py
+repositories/whitelist_repository.py
+
+
+# ============================================================================
+# SERVICES (Required - all files)
+# ============================================================================
+services/__init__.py
+services/container.py                     # IoC DI Container (singletons)
+services/alert_engine.py                  # Dedup + aggregation + Telegram
+services/auth_service.py                  # Login / password verification
+services/csv_analysis_service.py          # Batch CSV threat analysis
+services/detection_service.py             # Core ML inference + logging
+services/ip_list_service.py               # Whitelist/blacklist management
+services/model_evaluation_service.py      # Model benchmark/profiling
+services/model_service.py                 # Model CRUD + activation
+services/monitoring_service.py            # System metrics collection
+services/pcap_analysis_service.py         # PCAP ingestion pipeline
+
+
+# ============================================================================
+# ML ENGINE (Required - all files)
+# ============================================================================
+ml/__init__.py
+ml/feature_mapper.py                      # Raw flow -> ML feature vector
+ml/feature_schema.py                      # Feature column definitions
+ml/interfaces.py                          # IFlowExtractor ABC
+ml/model_adapter.py                       # Generic model wrapper
+ml/model_loader.py                        # Joblib deserialization
+ml/xgboost_booster_adapter.py             # XGBoost-specific adapter
+
+# Training scripts (optional - only needed for retraining)
+# ml/training/MachineLearningCVE/pipeline.py
+# ml/training/MachineLearningCVE/train_and_compare.py
+# ml/training/MachineLearningCVE/notes.txt
+
+
+# ============================================================================
+# CAPTURE ENGINE (Required - all files)
+# ============================================================================
+capture/__init__.py
+capture/extractor_factory.py              # native vs cicflowmeter switcher
+capture/flow.py                           # Flow dataclass
+capture/flow_assembler.py                 # Packet -> Flow aggregation
+capture/flow_feature_calculator.py        # Flow -> 68 numerical features
+capture/interface_lister.py               # Network interface enumeration
+capture/live_capture_service.py           # Native scapy-based capture
+capture/native_flow_extractor.py          # Scapy + FlowAssembler pipeline
+capture/packet_sniffer.py                 # Low-level packet sniffing
+capture/cicflowmeter_adapter.py           # External CICFlowMeter wrapper
+capture/cicflowmeter_live_capture_service.py
+
+
+# ============================================================================
+# USER INTERFACE (Required - all files)
+# ============================================================================
+ui/__init__.py
+ui/auth_guard.py                          # Page-level auth decorators
+ui/session.py                             # Streamlit session auth state
+
+ui/pages/__init__.py
+ui/pages/alerts.py
+ui/pages/blacklist.py
+ui/pages/dashboard.py
+ui/pages/detection.py
+ui/pages/live_capture.py
+ui/pages/live_flows.py
+ui/pages/login.py
+ui/pages/logs.py
+ui/pages/models.py
+ui/pages/monitoring.py
+ui/pages/settings.py
+ui/pages/whitelist.py
+
+
+# ============================================================================
+# UTILITIES (Required - all files)
+# ============================================================================
+utils/__init__.py
+utils/time_utils.py
+utils/validators.py
+
+
+# ============================================================================
+# ML MODEL ARTIFACTS (Required - critical for predictions)
+# ============================================================================
+models/.gitkeep
+models/label_encoder.joblib               # Label encoder (810 B)
+models/scaler.joblib                      # Feature scaler (4 KB)
+models/random_forest_v3.joblib            # Random Forest model (23 MB)
+models/random_forest_v3.joblib.meta.json  # RF model metadata
+models/xgboost_pipeline_v2.joblib         # XGBoost model (1.1 MB)
+models/xgboost_pipeline_v2.joblib.meta.json  # XGBoost model metadata
+
+
+# ============================================================================
+# DATABASE (Required - includes schema + seeded admin user)
+# ============================================================================
+data/.gitkeep
+data/ai_ids.db                            # SQLite database (174 MB)
+data/ai_ids.db-shm                        # SQLite shared memory
+data/ai_ids.db-wal                        # SQLite WAL journal
+
+
+# ============================================================================
+# SAMPLE DATA (Optional - useful for testing CSV analysis)
+# ============================================================================
+# data/captured_flows_master.csv           # Sample captured flows
+# data/cleaned_flows_master.csv            # Sample cleaned flows
+
+
+# ============================================================================
+# SCRIPTS (Optional - development/maintenance utilities)
+# ============================================================================
+# scripts/__init__.py
+# scripts/verify_foundation.py            # Foundation layer verification
+# scripts/register_model.py               # CLI model registration helper
+# scripts/availability_monitor.py          # Stability test
+# scripts/capture_uat_screenshots.py       # UAT screenshot capture
+# scripts/security_scan.py                # Security scanning utility
+
+
+# ============================================================================
+# TESTS (Optional - only needed for running test suite)
+# ============================================================================
+# tests/__init__.py
+# tests/conftest.py                       # Pytest fixtures
+# tests/test_capture_layer.py
+# tests/test_database.py
+# tests/test_ml_layer.py
+# tests/test_repositories.py
+# tests/test_security.py
+# tests/test_services_layer.py
+# tests/rf.joblib                         # Test fixture model
+
+
+# ============================================================================
+# DOCUMENTATION (Optional - for reference only)
+# ============================================================================
+# README.md
+# ARCHITECTURE.md
+# CHANGELOG.md
+# CONTRIBUTING.md
+# DEPLOYMENT.md
+# REQUIREMENTS.md
+# ROADMAP.md
+# SECURITY.md
+# TESTING.md
+
+
+# ============================================================================
+# DO NOT INCLUDE [EXCLUDE from deployment]
+# ============================================================================
+# __pycache__/                            # Python bytecode cache
+# .pytest_cache/                          # Pytest cache
+# .git/                                   # Git repository
+# .env                                    # Local environment (must regenerate)
+# venv/                                   # Virtual environment (must recreate)
+# logs/                                   # Runtime logs (auto-generated)
+# screenshots/                            # UAT evidence images
+# security_report/                        # ZAP scan output
+# postman/                                # API testing collections
+# .postman/                               # Postman workspace metadata
+# _uat_tests.py                           # UAT test runner
+# generate_report.py                      # Report generator (needs python-docx)
+# uat_report.md                           # UAT report
+# uat_results.json                        # UAT results
+# load_test_results.json                  # Load test results
+# availability_results.json               # Availability test results
+# rf.joblib                               # Duplicate model at root
+# models/models_evaluation_results.json    # Evaluation results (not needed at runtime)
+# *.docx                                  # University report document
+# ============================================================================
+
+
+# ============================================================================
+# QUICK START GUIDE
+# ============================================================================
+# 1. Copy all REQUIRED items above to the target machine
+# 2. Create virtual environment:
+#      python -m venv venv
+#      venv\Scripts\activate        (Windows)
+#      source venv/bin/activate     (Linux/Mac)
+# 3. Install dependencies:
+#      pip install -r requirements.txt
+# 4. Configure environment:
+#      copy .env.example .env
+#      Edit .env with your settings (especially AI_IDS_SECRET_KEY)
+# 5. Create required directories (if not present):
+#      mkdir logs
+#      mkdir data
+#      mkdir models
+# 6. Run the application:
+#      streamlit run app.py        (Web UI)
+#      python cli.py               (CLI interactive menu)
+#
+# Default login credentials (seeded automatically):
+#   Username: admin
+#   Password: admin
+#
+# IMPORTANT: For live network capture features, run as Administrator/root.
+# ============================================================================

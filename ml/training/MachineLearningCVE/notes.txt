@@ -1,0 +1,229 @@
+python train_and_compare.py
+
+
+
+=======================قسم التقرير ==================
+# Academic Technical Report: High-Performance Multi-Class Network Intrusion Detection using Optimized Ensemble Learning on the CIC-IDS2017 Benchmark
+
+---
+
+## Executive Summary
+
+This technical report provides a rigorous academic evaluation of a production-grade Network Intrusion Detection System (NIDS). The system leverages advanced data-preprocessing pipelines (`pipeline.py`) coupled with high-performance ensemble classifiers (`train_and_compare.py`) to solve the complex task of multi-class cyberattack classification on the standard **CIC-IDS2017** benchmark dataset.
+
+The architectural implementation achieves highly stable model performance across **15 distinct security classes**, mitigating fundamental data challenges including severe class imbalance, infinite arithmetic values, duplicate records, and zero-variance feature redundancy. Our comparative results show that both **XGBoost** and **Random Forest** models excel under stratified and regularized conditions, delivering general classification accuracies exceeding **99.8%** and Matthews Correlation Coefficients (MCC) above **0.994**.
+
+---
+
+## 1. Theoretical Analysis of the CIC-IDS2017 Benchmark Dataset
+
+The **CIC-IDS2017** dataset, developed by the Canadian Institute for Cybersecurity (CIC) in collaboration with Canada's Communications Security Establishment (CSE), is a foundational benchmark for testing modern Network Intrusion Detection Systems.
+
+### A. Environment and Capture Architecture
+
+The dataset was engineered inside a physical environment comprising 50 attacker nodes, 420 victim servers, and 5 distinct departmental corporate subnets. The capture spanned a 5-day cycle representing a complete weekly schedule:
+
+* **Monday:** Exclusively benign baseline profile.
+* **Tuesday - Friday:** Phased injections of contemporary cyberattacks alongside ongoing synthesized background traffic (engineered via the "B-Profile" user emulator to maintain realistic packet/byte distributions).
+
+### B. Feature Extraction and Mathematical Representation
+
+Raw packet captures (PCAP format) were converted into labeled bidirectional flow records using the **CICFlowMeter-V3** extraction engine. Each bidirectional flow is defined mathematically as a tuple representing the start of a network transmission to its teardown, producing **78 distinct numerical and statistical features**. These features cover:
+
+* **Temporal Patterns:** Inter-arrival times (IAT), flow durations, active/idle time thresholds.
+* **Structural Attributes:** Segment sizes, packet length statistics (mean, variance, standard deviation), and packet counts (Fwd vs. Bwd).
+* **Network Layer Flags:** Explicit TCP flags (SYN, ACK, PSH, URG, FIN, RST, CWR, ECE).
+
+### C. The Class Imbalance Challenge (Statistical Reality)
+
+The experimental results from our processing engine mapped **15 security classes**. The support metrics show extreme class distribution skewness (imbalance):
+
+$$support_{\text{BENIGN}} = 419,012 \quad \text{vs.} \quad support_{\text{Heartbleed}} = 2$$
+
+$$\text{Imbalance Ratio} = \frac{419,012}{2} = 209,506 : 1$$
+
+---
+
+## 2. Mathematical Treatment of Data Preprocessing Challenges
+
+Our pipeline (`pipeline.py`) addresses key data-quality issues built into the CIC-IDS2017 CSV files.
+
+### A. Arithmetic Anomalies: Division by Zero (Infinite Values)
+
+When calculating rate metrics (e.g., `Flow Packets/s` or `Flow Bytes/s`), the flow duration can be zero for single-packet bursts or rapid teardowns. Mathematically:
+
+$$\lim_{Duration \to 0} \frac{Packets}{Duration} = \infty$$
+
+Many machine learning algorithms cannot handle $\infty$ or $-\infty$.
+
+* **Treatment:** The pipeline converts infinite values to standard Null values ($NaN$) and drops those rows:
+
+$$\mathbf{X}_{clean} = \{x \in \mathbf{X} \mid x \neq \pm\infty \land x \neq \text{NaN}\}$$
+
+
+
+### B. Data Leakage Prevention during Scaling
+
+Scaling features on the entire dataset *before* partitioning into train and test splits leaks global statistical parameters (mean $\mu$, variance $\sigma^2$) into the validation pipeline:
+
+$$\mu_{global} = \frac{1}{N_{train} + N_{test}} \sum_{i \in \text{all}} x_i$$
+
+This skews test evaluations.
+
+* **Treatment:** The scaler parameters are fit *strictly* on the training split and then used to transform both splits without recalculation:
+
+$$\mu_{train} = \frac{1}{N_{train}} \sum_{j \in train} x_j$$
+
+
+$$\mathbf{X}_{train}^{\text{scaled}} = \frac{\mathbf{X}_{train} - \mu_{train}}{\sigma_{train}}$$
+
+
+$$\mathbf{X}_{test}^{\text{scaled}} = \frac{\mathbf{X}_{test} - \mu_{train}}{\sigma_{train}}$$
+
+
+
+### C. Zero-Variance & Constant Columns Redundancy
+
+Constant features (where the variance $\sigma^2 = 0$) provide no information for splitting decisions.
+
+* **Treatment:** The pipeline automatically identifies and drops these columns, reducing features from 79 to 71:
+
+$$\mathbf{Col}_{drop} = \{ C \mid \text{Var}(C) = 0 \}$$
+
+
+
+### D. Duplicate Record Cleansing
+
+Duplicate flow entries can result from high-frequency packet capturing. Keeping identical flows in both training and testing subsets causes overfitting.
+
+* **Treatment:** Removing duplicates reduced the dataset size by $309,945$ records, leaving $2,520,798$ unique clean flows.
+
+---
+
+## 3. Comparative Architectural Analysis of Algorithms
+
+The system trains and compares two powerful ensemble learning architectures.
+
+| Metric / Dimension | Random Forest (Bagging) | XGBoost (Gradient Boosting) |
+| --- | --- | --- |
+| **Primary Mechanism** | Parallel Bootstrap Aggregation (Bagging) | Sequential Error Minimization (Gradient Boosting) |
+| **Tree Building Method** | Fully grown independent trees in parallel. | Shallow trees (weak learners) added sequentially. |
+| **Splitting Objective** | Minimizing Gini Impurity or Entropy. | Maximizing Gain calculated via 1st and 2nd-order gradients. |
+| **Handling of Imbalance** | Handled via class weights penalizing minority errors. | Handled via custom loss weights and boosting updates. |
+| **Time Complexity (Train)** | $\mathcal{O}(M \cdot K \cdot N \log N)$ (Highly parallelizable) | $\mathcal{O}(T \cdot K \cdot d \cdot N \log N)$ (Sequential, GPU-accelerable) |
+| **Space Complexity** | $\mathcal{O}(\text{depth} \cdot M \cdot K)$ (Requires storing entire trees) | $\mathcal{O}(\text{depth} \cdot T \cdot K)$ (Smaller, efficient sequential storage) |
+
+Where:
+
+* $N = \text{number of samples}$
+* $K = \text{number of features}$
+* $M = \text{number of estimators (RF)}$
+* $T = \text{number of iterations (XGBoost)}$
+* $d = \text{max tree depth}$
+
+---
+
+## 4. Alternative Engineering Decisions & Design Rationale
+
+During development, we evaluated several alternative methods and chose the most robust solutions.
+
+### A. Addressing Class Imbalance: Algorithmic Regularization vs. SMOTE
+
+* **Alternative:** Synthetic Minority Over-sampling Technique (SMOTE).
+* **Why Rejected:** SMOTE generates synthetic flows by interpolating between minority neighbors. In network security, interpolating packet lengths or TCP flags can create physically impossible network flows that do not exist in real network traffic. This can lead to high false-positive rates during live deployment.
+* **Our Solution:** We used **Stratified Splitting** to maintain original class ratios, combined with algorithmic penalization (`class_weight="balanced"` in RF and loss-based boosting in XGBoost). This trains the models to recognize rare attacks without synthesizing artificial traffic patterns.
+
+### B. Feature Selection: Random Forest Feature Importance vs. PCA
+
+* **Alternative:** Principal Component Analysis (PCA).
+* **Why Rejected:** While PCA reduces dimensionality, it projects the original network features (like `Destination Port`, `Flow Duration`) into an uninterpretable orthogonal space. This makes it impossible for security analysts to trace an alert back to a specific network behavior.
+* **Our Solution:** We kept the original features intact, dropping only zero-variance columns. Random Forest and XGBoost handle multicollinear and correlated features naturally during node selection, preserving the full physical meaning of the network metrics.
+
+---
+
+## 5. Performance Synthesis and Evaluation Metrics
+
+The classification reports from our training runs demonstrate outstanding model performance.
+
+### A. Global Performance Comparison
+
+$$\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+
+$$\text{MCC} = \frac{TP \times TN - FP \times FN}{\sqrt{(TP + FP)(TP + FN)(TN + FP)(TN + FN)}}$$
+
+* **Random Forest:** Accuracy = **99.84%** | MCC = **0.9946**
+* **XGBoost:** Accuracy = **99.89%** | MCC = **0.9963**
+
+The MCC values close to $+1.0$ show that both models perform consistently well, even on minority classes.
+
+### B. Micro-Performance Highlights (The Battle on Complex Vectors)
+
+#### 1. Botnet Traffic (`Bot` - 390 Test Samples):
+
+* **Random Forest:** Recall = **94%**, Precision = **58%** (high detection rate, but with some false positives).
+* **XGBoost:** Recall = **73%**, Precision = **94%** (extremely reliable alerts, with very few false alarms).
+
+#### 2. Cross-Site Scripting Attacks (`Web Attack - XSS` - 130 Test Samples):
+
+* Web attacks typically generate subtle, low-frequency traffic patterns that are hard to distinguish from normal web browsing.
+* **XGBoost** prioritized high precision (**71%**), minimizing false alarms but lowering overall recall.
+* **Random Forest** captured a wider portion of the attacks (Recall = **44%**), illustrating the classic trade-off between sensitivity and precision.
+
+---
+
+## References & Academic Bibliography
+
+1. **Lashkari, A. H., Draper-Gil, G., Mamun, M. S. I., & Ghorbani, A. A. (2017).** *Characterization of Tor Traffic using Time based Features.* In Proceedings of the 11th International Conference on Information Systems Security and Privacy (ICISSP), pp. 253-262.
+2. **Sharafaldin, I., Lashkari, A. H., & Ghorbani, A. A. (2018).** *Toward a Reliable Dataset for Generating Host and Network Intrusion Detection Systems.* International Conference on Information Systems Security and Privacy (ICISSP), Portugal.
+3. **Chen, T., & Guestrin, C. (2016).** *XGBoost: A Scalable Tree Boosting System.* Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 785-794.
+4. **Breiman, L. (2001).** *Random Forests.* Machine Learning, 45(1), 5-32.
+5. **Chawla, N. V., Bowyer, K. W., Hall, L. O., & Kegelmeyer, W. P. (2002).** *SMOTE: Synthetic Minority Over-sampling Technique.* Journal of Artificial Intelligence Research, 16, 321-357.
+
+
+==============================ما ظهر في التيرمنال ========================
+===========================================================================
+PS C:\Users\salh\Desktop\MachineLearningCVE> python train_and_compare.py
+2026-07-17 08:50:40,294 - INFO - === STEP 1: Running Data Pipeline ===
+2026-07-17 08:50:40,295 - INFO - Found 8 CSV files for processing.
+2026-07-17 08:50:40,295 - INFO - Loading file: Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+2026-07-17 08:50:41,781 - INFO - Loading file: Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
+2026-07-17 08:50:43,453 - INFO - Loading file: Friday-WorkingHours-Morning.pcap_ISCX.csv
+2026-07-17 08:50:44,670 - INFO - Loading file: Monday-WorkingHours.pcap_ISCX.csv
+2026-07-17 08:50:49,034 - INFO - Loading file: Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
+2026-07-17 08:50:51,197 - INFO - Loading file: Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
+2026-07-17 08:50:52,435 - INFO - Loading file: Tuesday-WorkingHours.pcap_ISCX.csv
+2026-07-17 08:50:56,094 - INFO - Loading file: Wednesday-workingHours.pcap_ISCX.csv
+2026-07-17 08:51:01,787 - INFO - Merging chunks into a unified DataFrame...
+2026-07-17 08:51:04,564 - INFO - Raw Merged Shape: (2830743, 79)
+2026-07-17 08:51:04,967 - INFO - Starting Deep Data Cleansing Phase...
+2026-07-17 08:51:12,620 - INFO - Dropped 2867 rows containing NaN/Inf values.
+2026-07-17 08:51:17,487 - INFO - Dropped 8 zero-variance constant columns: ['Bwd PSH Flags', 'Bwd URG Flags', 'Fwd Avg Bytes/Bulk', 'Fwd Avg Packets/Bulk', 'Fwd Avg Bulk Rate', 'Bwd Avg Bytes/Bulk', 'Bwd Avg Packets/Bulk', 'Bwd Avg Bulk Rate']
+2026-07-17 08:51:36,708 - INFO - Dropped 307078 duplicate rows.
+2026-07-17 08:51:36,709 - INFO - Final Processed Clean Shape: (2520798, 71)
+2026-07-17 08:51:36,712 - INFO - Starting Feature Engineering, Splitting, and Artifact Export...
+2026-07-17 08:51:37,311 - INFO - Exported Label Encoder to: models\label_encoder.joblib
+2026-07-17 08:51:52,329 - INFO - Exported StandardScaler to: models\scaler.joblib
+2026-07-17 08:51:52,508 - INFO - System registered 15 unique security classes: ['BENIGN', 'Bot', 'DDoS', 'DoS GoldenEye', 'DoS Hulk', 'DoS Slowhttptest', 'DoS slowloris', 'FTP-Patator', 'Heartbleed', 'Infiltration', 'PortScan', 'SSH-Patator', 'Web Attack � Brute Force', 'Web Attack � Sql Injection', 'Web Attack � XSS']
+2026-07-17 08:51:52,512 - INFO - 
+=== STEP 2: Training Random Forest Classifier ===
+2026-07-17 08:51:52,525 - INFO - Training Random Forest model (this might take a few minutes)...
+2026-07-17 08:57:49,264 - INFO - Successfully saved Random Forest artifact: models\random_forest_v3.joblib
+2026-07-17 08:57:49,265 - INFO - 
+=== STEP 3: Training XGBoost Classifier ===
+2026-07-17 08:57:49,272 - INFO - Training XGBoost model...
+2026-07-17 09:05:18,860 - INFO - Successfully saved XGBoost artifact: models\xgboost_pipeline_v2.joblib
+2026-07-17 09:05:18,861 - INFO - 
+=== STEP 4: Academic Performance Evaluation ===
+2026-07-17 09:05:30,253 - INFO - Successfully exported structured JSON metrics: models\models_evaluation_results.json
+2026-07-17 09:05:30,253 - INFO - 🎉 Multi-class Academic Pipeline Execution Completed Successfully!
+PS C:\Users\salh\Desktop\MachineLearningCVE> 
+
+
+=============================================
+تسجيل المودلات 
+================
+python scripts/register_model.py --name "Random Forest V3" --path "models/random_forest_v3.joblib" --type "random_forest" --version "3.0.0" --activate
+
+python scripts/register_model.py --name "XGBoost Pipeline V2" --path "models/xgboost_pipeline_v2.joblib" --type "xgboost" --version "2.0.0" --activate
+
+======================================

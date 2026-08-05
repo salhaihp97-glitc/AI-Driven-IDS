@@ -1,0 +1,39 @@
+# ==============================================================================
+# AI-IDS SYSTEM DEPENDENCIES & CORE RUNTIME SPECIFICATIONS (2026 PROD ENVIRONMENT)
+# ==============================================================================
+
+# === Core Foundation Layer (Security & Configurations) ===
+bcrypt>=4.2.0
+python-dotenv>=1.0.1
+
+# === Web UI Framework ===
+# Standard enterprise framework supporting full responsive layout configurations
+streamlit>=1.42.0
+
+# === Machine Learning & Analytics Pipeline ===
+scikit-learn>=1.6.0
+xgboost>=2.1.0
+joblib>=1.4.2
+numpy>=1.26.4
+pandas>=2.2.3
+
+# === Visual Data Mining & SOC Dashboards ===
+plotly>=5.24.0
+matplotlib>=3.10.0
+
+# === Network Packet Ingestion & Capture Layer ===
+# NOTE: Requires high-privilege raw sockets (Root on Linux / Npcap on Windows).
+# Core system functions cleanly via isolated CSV analysis if this layer is unmounted.
+scapy>=2.6.0
+cicflowmeter>=0.5.0
+
+# === Host Infrastructure Telemetry & Resource Profiling ===
+psutil>=6.0.0
+
+# === Asynchronous Threat Notification Webhooks ===
+# Dispatches security payloads to Telegram Bot API via native lightweight I/O channels.
+requests>=2.32.3
+
+# === Quality Assurance & Integration Testing Suite ===
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
