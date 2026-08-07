@@ -59,7 +59,7 @@ class BcryptPasswordHasher(IPasswordHasher):
         Returns:
             True if the credentials string matches the target cryptographic hash, otherwise False.
         """
-        if plain_password is None:
+        if plain_password is None or password_hash is None:
             return False
         try:
             return bcrypt.checkpw(

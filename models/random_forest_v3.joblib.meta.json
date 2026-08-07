@@ -1,7 +1,6 @@
 {
   "feature_names": [
     "Destination Port",
-    "Protocol",
     "Flow Duration",
     "Total Fwd Packets",
     "Total Backward Packets",
@@ -32,6 +31,7 @@
     "Bwd IAT Max",
     "Bwd IAT Min",
     "Fwd PSH Flags",
+    "Fwd URG Flags",
     "Fwd Header Length",
     "Bwd Header Length",
     "Fwd Packets/s",
@@ -47,12 +47,13 @@
     "PSH Flag Count",
     "ACK Flag Count",
     "URG Flag Count",
-    "CWR Flag Count",
+    "CWE Flag Count",
     "ECE Flag Count",
     "Down/Up Ratio",
     "Average Packet Size",
     "Avg Fwd Segment Size",
     "Avg Bwd Segment Size",
+    "Fwd Header Length.1",
     "Subflow Fwd Packets",
     "Subflow Fwd Bytes",
     "Subflow Bwd Packets",
@@ -68,8 +69,7 @@
     "Idle Mean",
     "Idle Std",
     "Idle Max",
-    "Idle Min",
-    "Fwd Header Length.1"
+    "Idle Min"
   ],
   "model_type": "random_forest",
   "version": "3.0.0"

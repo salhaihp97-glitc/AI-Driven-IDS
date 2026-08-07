@@ -14,11 +14,13 @@ from typing import Final
 
 from config.constants import LogLevel, LogSource
 from core.entities.log_entry import LogEntry
+from core.exceptions import ValidationError
 from infrastructure.firewall.windows_firewall import WindowsFirewallManager
 from infrastructure.logging.logger_factory import get_logger
 from repositories.blacklist_repository import BlacklistRepository
 from repositories.log_repository import LogRepository
 from repositories.whitelist_repository import WhitelistRepository
+from utils.validators import validate_ip_address
 
 logger = get_logger("services.firewall_service")
 
@@ -76,6 +78,13 @@ class FirewallService:
         if not ip_address or ip_address == "unknown":
             return False
 
+        # Only valid IP literals may reach the persistence layer or netsh.
+        try:
+            ip_address = validate_ip_address(ip_address)
+        except ValidationError:
+            logger.warning("Auto-block rejected malformed IP address: %r", ip_address)
+            return False
+
         # Respect whitelist — admin trust overrides auto-block
         if self._whitelist.exists(ip_address):
             logger.info(
@@ -120,6 +129,8 @@ class FirewallService:
         if not ip_address:
             return result
 
+        ip_address = validate_ip_address(ip_address)
+
         # Remove any allow rule
         self._fw.remove_allow_rule(ip_address)
 
@@ -157,6 +168,8 @@ class FirewallService:
 
         if not ip_address:
             return result
+
+        ip_address = validate_ip_address(ip_address)
 
         # Remove any block rule
         self._fw.remove_block_rule(ip_address)

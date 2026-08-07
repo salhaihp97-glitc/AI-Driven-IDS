@@ -71,6 +71,12 @@
     "Idle Max",
     "Idle Min"
   ],
-  "model_type": "xgboost",
-  "version": "2.0.0"
+  "classes": [
+    "BENIGN",
+    "DDoS",
+    "PortScan",
+    "SYN Flood"
+  ],
+  "model_type": "random_forest",
+  "version": "1.0.0"
 }

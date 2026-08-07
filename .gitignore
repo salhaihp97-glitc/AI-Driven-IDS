@@ -70,6 +70,14 @@ env/
 # --- Generated Documentation (broken script) ---
 generate_architecture_docx.py
 
+# --- Dataset & Live-capture artifacts (large; not committed) ---
+ml/training/MachineLearningCVE/data/
+simulated_attacks_demo.csv
+simulated_attacks_demo.pcap
+captured_flows_master.csv
+cleaned_flows_master.csv
+
 # --- Temporary directories ---
 tmp/
 tmp_pytest/
+ml/models

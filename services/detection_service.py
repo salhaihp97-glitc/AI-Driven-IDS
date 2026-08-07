@@ -21,7 +21,6 @@ from core.entities.detection import Detection
 from core.entities.log_entry import LogEntry
 from core.exceptions import ValidationError
 from infrastructure.logging.logger_factory import get_logger
-from ml.anomaly_signature import AnomalySignatureEngine
 from ml.feature_mapper import FeatureMapper
 from repositories.detection_repository import DetectionRepository
 from repositories.log_repository import LogRepository
@@ -62,7 +61,6 @@ class DetectionService:
         alert_engine: AlertEngine,
         ip_list_service: IpListService | None = None,
         feature_mapper: FeatureMapper | None = None,
-        anomaly_signature_engine: AnomalySignatureEngine | None = None,
         settings: Settings | None = None,
     ) -> None:
         """
@@ -74,18 +72,7 @@ class DetectionService:
         self._alerts: Final[AlertEngine] = alert_engine
         self._ip_lists: Final[IpListService | None] = ip_list_service
         self._mapper: Final[FeatureMapper] = feature_mapper or FeatureMapper()
-        self._signatures: Final[AnomalySignatureEngine] = anomaly_signature_engine or AnomalySignatureEngine()
         self._settings: Final[Settings] = settings or get_settings()
-
-    def reset_signatures(self) -> None:
-        """
-        Resets cross-flow signature tracking before a new independent analysis batch.
-
-        File analysis services call this before auditing a fresh CSV/PCAP so every file
-        yields its own detections. Live capture flows are unaffected and keep the scan
-        cooldown active to bound the alert stream.
-        """
-        self._signatures.reset()
 
     def run(
         self,
@@ -149,35 +136,18 @@ class DetectionService:
             if prediction != BENIGN_CLASS_INDEX:
                 logger.warning("Malicious footprint detected! Class: %d | Confidence: %.2f%%", prediction, confidence * 100)
 
-            # 3b. Signature augmentation: catch out-of-distribution attack patterns the
-            # CICIDS2017-trained models cannot generalize to (e.g., loopback SYN floods,
-            # fast port scans). Applies only when the ML verdict is benign so in-distribution
-            # detections are preserved.
-            signature_hit = self._signatures.assess(
-                raw_features,
-                ml_benign_confidence=confidence if prediction == BENIGN_CLASS_INDEX else None,
-                source_ip=source_ip,
-                destination_ip=destination_ip,
-            )
-            signature_override = signature_hit.is_attack and prediction == BENIGN_CLASS_INDEX
-            if signature_override:
-                prediction = 1
-                confidence = signature_hit.confidence
-                logger.warning(
-                    "Signature override raised benign ML verdict to %s | Confidence: %.2f%%",
-                    signature_hit.attack_type,
-                    confidence * 100,
-                )
+            # 3b. Pure ML classifier authority: the active model is the sole arbiter
+            # of verdicts. No heuristic/rule overrides are applied — any threat signal
+            # must originate from the model's decision boundary.
+            signature_hit = None
+            signature_override = False
 
-            # 4. Resolve attack type via LabelEncoder (or signature type when overridden)
+            # 4. Resolve attack type via per-model class vocabulary
+            # (meta sidecar ``classes`` wins; global label encoder is the fallback).
             attack_type = ""
-            if not signature_override:
-                label_encoder = self._models.get_label_encoder(model_id)
-                if label_encoder is not None and hasattr(label_encoder, "classes_"):
-                    if 0 <= prediction < len(label_encoder.classes_):
-                        attack_type = str(label_encoder.classes_[prediction])
-            else:
-                attack_type = signature_hit.attack_type
+            model_classes = self._models.get_model_classes(model_id)
+            if model_classes and 0 <= prediction < len(model_classes):
+                attack_type = model_classes[prediction]
 
             # 4b. Build feature-level explanation for model decisions
             model_name = self._resolve_model_name(model_id)
@@ -200,9 +170,7 @@ class DetectionService:
                     severity = ""
                     attack_reason = f"Whitelisted admin test traffic from {source_ip} — classified as benign"
             else:
-                if signature_override:
-                    attack_reason = signature_hit.reason
-                elif prediction != BENIGN_CLASS_INDEX:
+                if prediction != BENIGN_CLASS_INDEX:
                     attack_reason = (
                         f"ML model ({model_name}) classified as {attack_type} "
                         f"with {confidence:.1%} confidence — "

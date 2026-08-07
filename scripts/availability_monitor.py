@@ -26,8 +26,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 import psutil
 from services.container import get_container
-from capture.flow_assembler import FlowAssembler
-from capture.flow_feature_calculator import FlowFeatureCalculator
+from capture.extractor_factory import get_flow_extractor
 from database.connection import get_db_connection
 
 LOG_FILE = _PROJECT_ROOT / "logs" / "ai_ids.log"
@@ -46,21 +45,44 @@ def count_log_errors() -> dict:
 
 
 def run_detection_cycle(cycle: int) -> dict:
-    """Execute one cycle: assemble 3 synthetic packets, extract features, predict."""
+    """Execute one cycle: extract a synthetic 2-packet TCP flow via CICFlowMeter, predict."""
     t0 = time.perf_counter()
 
-    assembler = FlowAssembler(idle_timeout_seconds=5.0)
-    assembler.add_packet(src_ip="10.0.0.1", dst_ip="10.0.0.2",
-                         src_port=12345, dst_port=80, protocol=6,
-                         timestamp=time.time(), size_bytes=100, syn=True)
-    assembler.add_packet(src_ip="10.0.0.2", dst_ip="10.0.0.1",
-                         src_port=80, dst_port=12345, protocol=6,
-                         timestamp=time.time() + 0.1, size_bytes=200,
-                         syn=True, ack=True)
-    flows = assembler.flush_all()
+    # CICFlowMeter is the sole flow-extraction backend. Build a tiny synthetic
+    # TCP PCAP, extract its flow features, and run the model on them.
+    pcap_path = _PROJECT_ROOT / "data" / "monitor_probe.pcap"
+    pcap_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = time.time()
+    try:
+        from scapy.all import IP, TCP, wrpcap
+        pkt1 = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=12345, dport=80, flags="S", seq=1000)
+        pkt1.time = ts
+        pkt2 = IP(src="10.0.0.2", dst="10.0.0.1") / TCP(sport=80, dport=12345, flags="SA", seq=2000, ack=1001)
+        pkt2.time = ts + 0.1
+        wrpcap(str(pcap_path), [pkt1, pkt2])
+    except Exception as exc:
+        return {
+            "cycle": cycle,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "extract_ms": 0.0,
+            "classify_ms": 0.0,
+            "total_ms": (time.perf_counter() - t0) * 1000,
+            "prediction": None,
+            "confidence": None,
+            "memory_mb": psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024),
+            "connections": len(psutil.Process(os.getpid()).connections()),
+            "error": f"PCAP synthesis failed: {exc}",
+        }
 
-    calc = FlowFeatureCalculator()
-    features = calc.compute(flows[0]) if flows else None
+    try:
+        extractor = get_flow_extractor()
+        flows = extractor.extract_from_pcap(str(pcap_path))
+        features = flows[0] if flows else None
+    finally:
+        try:
+            pcap_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     t1 = time.perf_counter()
     extract_ms = (t1 - t0) * 1000
 

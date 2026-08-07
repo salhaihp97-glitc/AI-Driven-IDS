@@ -4,7 +4,6 @@ Live Capture Page — Real-Time Network Packet Ingestion & Threat Inference.
 
 from __future__ import annotations
 
-import time
 import streamlit as st
 
 from capture.interface_lister import NetworkInterfaceLister
@@ -17,13 +16,12 @@ from ui.auth_guard import require_login
 require_login()
 
 settings = get_settings()
-mode = settings.live_capture_mode
 container = get_container()
 
 live_service = get_live_capture_service()
 
 st.title("Live Capture")
-st.caption("Native capture" if mode == "native" else "CICFlowMeter capture")
+st.caption("CICFlowMeter capture")
 
 active_models = container.model_service.get_active_models()
 if not active_models:
@@ -63,29 +61,33 @@ with btn_col2:
 st.divider()
 
 status = live_service.status
-metrics_placeholder = st.empty()
+if status.get("last_error"):
+    st.error(f"Error: {status.get('last_error')}")
 
-if status["last_error"]:
-    st.error(f"Error: {status['last_error']}")
 
-if status["is_running"]:
-    for _ in range(settings.live_ui_poll_loops):
-        status = live_service.status
-        if not status["is_running"]:
-            break
-        with metrics_placeholder.container():
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Status", "Running")
-            c2.metric("Packets", f"{status['packet_count']:,}")
-            c3.metric("Flows", f"{status['active_flows']:,}")
-        time.sleep(settings.live_ui_poll_interval)
-    st.rerun()
-else:
-    with metrics_placeholder.container():
-        c1, c2, c3 = st.columns(3)
+@st.fragment(run_every=max(1.0, settings.live_ui_poll_interval))
+def _render_live_metrics() -> None:
+    """Renders the live capture metrics on an asynchronous refresh cadence.
+
+    The block runs on Streamlit's fragment scheduler instead of blocking the
+    script thread in a synchronous sleep loop. This keeps the page responsive
+    (start/stop controls still clickable) and avoids freezing the websocket,
+    which previously caused the browser to drop the connection under sustained
+    live traffic.
+    """
+    current = live_service.status
+    c1, c2, c3 = st.columns(3)
+    if current["is_running"]:
+        c1.metric("Status", "Running")
+        c2.metric("Packets", f"{current['packet_count']:,}")
+        c3.metric("Flows", f"{current['active_flows']:,}")
+    else:
         c1.metric("Status", "Idle")
-        c2.metric("Packets", f"{status['packet_count']:,}")
-        c3.metric("Flows", f"{status['active_flows']:,}")
+        c2.metric("Packets", f"{current['packet_count']:,}")
+        c3.metric("Flows", f"{current['active_flows']:,}")
+
+
+_render_live_metrics()
 
 if hasattr(live_service, 'get_master_csv_path'):
     st.divider()

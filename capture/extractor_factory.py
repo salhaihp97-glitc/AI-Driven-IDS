@@ -1,47 +1,32 @@
 """
 Flow Extractor Factory Module.
 
-Implements the Factory Pattern to decouple client subsystems from the structural 
-instantiation details of different IFlowExtractor concrete implementations. Resolves 
-dependencies dynamically at runtime using environmental variable configurations.
+CICFlowMeter (pure-Python) is the sole flow-extraction backend for offline PCAP
+analysis. The factory keeps a single construction point so consumers resolve the
+extractor through one stable seam rather than instantiating concrete classes
+directly.
+
+There is deliberately no mode branching: the native Python aggregation pipeline
+has been removed, so this factory always returns the CICFlowMeter adapter.
 """
 
 from __future__ import annotations
 
-import os
-from typing import Final
-
-from core.exceptions import ConfigurationError
 from infrastructure.logging.logger_factory import get_logger
 from ml.interfaces import IFlowExtractor
 
 # Initialize Component-Specific Logger Interface Instance
 logger = get_logger("capture.extractor_factory")
 
-# Fallback Configuration Constants
-DEFAULT_EXTRACTOR_MODE: Final[str] = "native"
-
 
 def get_flow_extractor() -> IFlowExtractor:
     """
-    Evaluates system environment variables to construct and return the chosen telemetry extraction provider.
+    Returns the sole supported flow extractor: the pure-Python CICFlowMeter adapter.
 
     Raises:
-        ConfigurationError: If the chosen strategy configuration lacks valid required dependencies.
+        ConfigurationError: If the required third-party packages are unavailable.
     """
-    raw_mode = os.getenv("AI_IDS_FLOW_EXTRACTOR", DEFAULT_EXTRACTOR_MODE)
-    mode: Final[str] = str(raw_mode).strip().lower()
+    from capture.cicflowmeter_adapter import CICFlowMeterAdapter
 
-    logger.debug("Resolving flow extractor implementation strategy. Configured target key: '%s'", mode)
-
-    if mode == "cicflowmeter":
-        from capture.cicflowmeter_adapter import CICFlowMeterAdapter
-
-        logger.info("Factory Action: Initializing pure-Python CICFlowMeterAdapter engine.")
-        return CICFlowMeterAdapter()
-
-    # Default Architectural Fallback Routing Logic
-    from capture.native_flow_extractor import NativeFlowExtractor
-
-    logger.info("Factory Action: Initializing local NativeFlowExtractor engine interface (Pure Python mode).")
-    return NativeFlowExtractor()
+    logger.info("Factory Action: Initializing pure-Python CICFlowMeterAdapter engine.")
+    return CICFlowMeterAdapter()

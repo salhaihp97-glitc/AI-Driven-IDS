@@ -131,15 +131,11 @@ ml/xgboost_booster_adapter.py             # XGBoost-specific adapter
 # CAPTURE ENGINE (Required - all files)
 # ============================================================================
 capture/__init__.py
-capture/extractor_factory.py              # native vs cicflowmeter switcher
-capture/flow.py                           # Flow dataclass
-capture/flow_assembler.py                 # Packet -> Flow aggregation
-capture/flow_feature_calculator.py        # Flow -> 68 numerical features
+capture/extractor_factory.py              # Sole extractor factory (CICFlowMeter)
+capture/flow_models.py                    # Shared flow data contract (FlowFeatures, protocol names)
 capture/interface_lister.py               # Network interface enumeration
-capture/live_capture_service.py           # Native scapy-based capture
-capture/native_flow_extractor.py          # Scapy + FlowAssembler pipeline
-capture/packet_sniffer.py                 # Low-level packet sniffing
-capture/cicflowmeter_adapter.py           # External CICFlowMeter wrapper
+capture/live_capture_service.py           # Live capture singleton factory (CICFlowMeter)
+capture/cicflowmeter_adapter.py           # Pure-Python CICFlowMeter PCAP extraction
 capture/cicflowmeter_live_capture_service.py
 
 

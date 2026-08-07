@@ -27,6 +27,7 @@ import requests
 
 from config.constants import SubscriberStatus
 from config.settings import get_settings
+from core.entities.detection import Detection
 from infrastructure.logging.logger_factory import get_logger
 
 logger = get_logger("infrastructure.telegram_notifier")
@@ -47,19 +48,26 @@ _CIRCUIT_BREAKER_RESET_SECONDS: Final[float] = 60.0
 # Severity Classification
 # ---------------------------------------------------------------------------
 
+_SEVERITY_EMOJI: Final[dict[str, str]] = {
+    "CRITICAL": "\U0001f534",
+    "HIGH": "\U0001f7e0",
+    "MEDIUM": "\U0001f7e1",
+    "LOW": "\U0001f7e2",
+}
+
+
 def _classify_severity(confidence: float) -> tuple[str, str]:
-    """Map ML confidence score to a threat severity tier.
+    """Map an ML confidence score to a threat severity tier.
+
+    The numeric bands (0.90 / 0.70 / 0.40) are owned by the single canonical
+    classifier ``Detection.classify_severity``; this module only resolves the
+    display emoji, so alerting severity can never diverge from the UI/DB tiers.
 
     Returns:
         A ``(label, emoji)`` tuple for display in the notification payload.
     """
-    if confidence >= 0.90:
-        return "CRITICAL", "\U0001f534"
-    if confidence >= 0.70:
-        return "HIGH", "\U0001f7e0"
-    if confidence >= 0.40:
-        return "MEDIUM", "\U0001f7e1"
-    return "LOW", "\U0001f7e2"
+    label = Detection.classify_severity(confidence, is_malicious=True)
+    return label, _SEVERITY_EMOJI.get(label, "\U0001f7e2")
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +194,9 @@ class TelegramNotifier:
             occurred_at: Timestamp of the detection event (UTC).
 
         Returns:
-            ``True`` always (actual delivery is async). Check logs for failures.
+            ``True`` when the notification was enqueued for delivery (a recipient
+            exists and the dispatch was handed to a daemon thread), ``False`` when
+            it was dropped (no bot token, no recipients, or circuit breaker open).
         """
         severity_label, severity_emoji = _classify_severity(confidence)
         event_time: Final[datetime] = occurred_at or datetime.now(UTC)
@@ -204,8 +214,7 @@ class TelegramNotifier:
             alert_id=alert_id,
             source_type=source_type,
         )
-        self._dispatch_async(text)
-        return True
+        return self._dispatch_async(text)
 
     def send_escalation_alert(
         self,
@@ -224,7 +233,8 @@ class TelegramNotifier:
         is continuing and the occurrence count has escalated significantly.
 
         Returns:
-            ``True`` always (actual delivery is async).
+            ``True`` when the escalation was enqueued for delivery, ``False`` when
+            it was dropped (no bot token, no recipients, or circuit breaker open).
         """
         severity_label, severity_emoji = _classify_severity(confidence)
         formatted_time: Final[str] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -242,8 +252,7 @@ class TelegramNotifier:
             alert_id=alert_id,
             source_type=source_type,
         )
-        self._dispatch_async(text)
-        return True
+        return self._dispatch_async(text)
 
     def send_test_alert(self) -> bool:
         """Dispatch a connectivity test payload to every active recipient.
@@ -532,13 +541,13 @@ class TelegramNotifier:
             "\u26a0\ufe0f <b>Recommended Actions:</b>",
         ]
 
-        if confidence >= 0.90:
+        if severity_label == "CRITICAL":
             lines += [
                 "  1) <b>Immediate containment</b> \u2014 isolate source host",
                 "  2) Block IP at perimeter firewall",
                 "  3) Capture full packet trace for forensics",
             ]
-        elif confidence >= 0.70:
+        elif severity_label in ("HIGH", "MEDIUM"):
             lines += [
                 "  1) Investigate source IP activity logs",
                 "  2) Monitor lateral movement attempts",
@@ -659,18 +668,29 @@ class TelegramNotifier:
     # Async Dispatch (threading)
     # ------------------------------------------------------------------
 
-    def _dispatch_async(self, text: str) -> None:
+    def _dispatch_async(self, text: str) -> bool:
         """Enqueue a Telegram send on a daemon thread for non-blocking delivery.
 
         The recipient list is resolved on the **caller's** thread and passed into
         the daemon thread. This keeps all persistence access on application
         threads and avoids spawning short-lived SQLite connections on background
         dispatch threads (which could outlive caller transactions).
+
+        Returns:
+            ``True`` when a delivery was enqueued, ``False`` when the dispatch
+            was dropped (no bot token, no recipients, or circuit breaker open).
         """
+        if not self._bot_token:
+            logger.warning("Telegram bot token is not configured — notification dropped.")
+            return False
+        if self.is_circuit_open:
+            logger.warning("Circuit breaker is open — dropping Telegram notification.")
+            return False
+
         recipients: Final[list[str]] = self._recipient_chat_ids()
         if not recipients:
             logger.warning("No active Telegram recipients configured — notification dropped.")
-            return
+            return False
 
         thread = threading.Thread(
             target=self._send_with_retry,
@@ -679,6 +699,7 @@ class TelegramNotifier:
             name="tg-notify",
         )
         thread.start()
+        return True
 
     # ------------------------------------------------------------------
     # Retry Logic with Exponential Backoff
@@ -767,6 +788,17 @@ class TelegramNotifier:
     # Low-Level HTTP Transport
     # ------------------------------------------------------------------
 
+    def _safe(self, message: str) -> str:
+        """Redact the live bot token from an arbitrary message before it reaches logs/UI.
+
+        Transport exceptions raised by ``requests`` embed the full request URL
+        (``https://api.telegram.org/bot<token>/sendMessage``), which would otherwise
+        leak the credential into log files or the settings UI.
+        """
+        if not self._bot_token:
+            return message
+        return message.replace(self._bot_token, "***REDACTED***")
+
     def _send_raw(self, text: str, chat_id: Optional[str] = None) -> bool:
         """Execute a single HTTP POST to the Telegram sendMessage endpoint.
 
@@ -822,5 +854,5 @@ class TelegramNotifier:
             logger.error("Failed to establish connection to Telegram API.")
             return False
         except requests.RequestException as exc:
-            logger.error("Telegram transport error: %s", exc)
+            logger.error("Telegram transport error: %s", self._safe(str(exc)))
             return False

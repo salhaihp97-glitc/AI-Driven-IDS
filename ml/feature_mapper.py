@@ -8,6 +8,7 @@ casing differences, character anomalies, structural naming aliases, and missing 
 
 from __future__ import annotations
 
+import itertools
 import re
 from typing import Final, Union
 
@@ -147,6 +148,74 @@ class FeatureMapper:
         clean_name: Final[str] = re.sub(r'[\s_.\-/]', '', name).strip().lower()
         return self._aliases.get(clean_name, clean_name)
 
+# -- Programmatic snake_case -> canonical expansion ---------------------------
+    # CICFlowMeter emits snake_case abbreviations (e.g. ``flow_byts_s``, ``tot_fwd_pkts``)
+    # that must resolve to the CICIDS2017 academic names the models were trained on
+    # (e.g. ``Flow Bytes/s``, ``Total Fwd Packets``). The static ``_aliases`` table
+    # covers the full known set; this token layer *dynamically* derives candidate
+    # spellings from a snake_case name itself, so an un-enumerated abbreviation variant
+    # still matches instead of being silently zero-filled.
+    # Maps a token to the semantic word(s) it may abbreviate.
+    _TOKEN_EXPANSIONS: Final[dict[str, tuple[str, ...]]] = {
+        "fwd": ("fwd", "forward", "fwdt"),
+        "bwd": ("bwd", "backward", "back"),
+        "fwdt": ("fwd", "forward", "fwdt"),
+        "bwt": ("bwd", "backward", "back"),
+        "pkts": ("pkt", "pkts", "packets"),
+        "pkt": ("pkt", "pkts", "packet"),
+        "packets": ("pkt", "pkts", "packet"),
+        "byts": ("byt", "byts", "byte", "bytes"),
+        "byt": ("byt", "byts", "byte", "bytes"),
+        "bytes": ("byt", "byts", "byte", "bytes"),
+        "len": ("len", "length"),
+        "segsz": ("segsz", "segment", "segments", "segmentsize"),
+        "win": ("win", "window"),
+        "totlen": ("tot", "totlen", "total", "totallength"),
+        "tot": ("tot", "total"),
+        "iat": ("iat"),
+        "ttl": ("ttl"),
+        "hl": ("hl"),
+        "proto": ("proto", "protocol"),
+        "init": ("init", "initial"),
+        "mean": ("mean", "avg", "average"),
+        "max": ("max", "maximum"),
+        "min": ("min", "minimum"),
+        "std": ("std", "standard"),
+    }
+
+    @staticmethod
+    def _tokenize(name: str) -> list[str]:
+        """Splits a feature name into lowercase semantic tokens."""
+        if not name:
+            return []
+        clean = re.sub(r'[\s_.\-/]+', '_', name).strip("_").lower()
+        tokens: list[str] = []
+        for part in clean.split("_"):
+            for s in re.split(r'(?<=[a-z0-9])(?=[A-Z0-9])|(?<=[A-Z])(?=[A-Z][a-z])', part):
+                s = s.lower()
+                if s:
+                    tokens.append(s)
+        return tokens
+
+    def _expand_key(self, normalized_key: str) -> set[str]:
+        """
+        Derives the union of normalized spelling variants for a snake_case name by
+        substituting each token with its known synonyms (e.g. ``flow`` + ``byts`` +
+        ``s`` -> ``flowbytess``, ``flowbytess``, ``flowbytess``). Used to index live
+        columns under every key a CICFlowMeter export might use.
+        """
+        raw_clean = re.sub(r'[\s_.\-/]+', '', normalized_key).strip().lower()
+        variants: set[str] = set()
+        if raw_clean:
+            variants.add(raw_clean)
+        tokens = self._tokenize(normalized_key)
+        if not tokens:
+            return variants
+        pools = [self._TOKEN_EXPANSIONS.get(t, (t,)) for t in tokens]
+        for combo in itertools.product(*pools):
+            variants.add("".join(combo))
+        return variants
+
     def map(self, available_features: dict[str, float], required_features: list[str]) -> np.ndarray:
         """
         Generates an ordered NumPy inference vector matching the required feature signatures.
@@ -159,12 +228,18 @@ class FeatureMapper:
         Compiles the aligned numerical inference array and generates a structural missing-fields audit report.
         """
         normalized_available: Final[dict[str, float]] = {}
+        expanded_index: dict[str, float] = {}
         for k, v in available_features.items():
             norm_k = self._normalize(k)
             normalized_available[norm_k] = v
             
             raw_clean = re.sub(r'[\s_.\-/]', '', k).strip().lower()
             normalized_available[raw_clean] = v
+            # Index every programmatically-derived spelling variant so an unexpected
+            # snake_case abbreviation still resolves to its live value.
+            for variant in self._expand_key(k):
+                if variant and variant not in normalized_available:
+                    expanded_index.setdefault(variant, v)
 
         vector: Final[np.ndarray] = np.empty(len(required_features), dtype=float)
         missing_features: list[str] = []
@@ -190,6 +265,14 @@ class FeatureMapper:
                         break
                     if alias_val == key and target_key in normalized_available:
                         matched_value = normalized_available[target_key]
+                        break
+
+            # Dynamic programmatic fallback: expand the required name into its
+            # canonical token spellings and probe the live-column expansion index.
+            if matched_value is None:
+                for variant in self._expand_key(feature_name):
+                    if variant in expanded_index:
+                        matched_value = expanded_index[variant]
                         break
 
             if matched_value is not None:
@@ -222,12 +305,16 @@ class FeatureMapper:
 
         # Build column normalization lookup map for current DataFrame
         column_map: dict[str, str] = {}
+        expanded_index: dict[str, str] = {}
         for col in df.columns:
             norm_col = self._normalize(col)
             column_map[norm_col] = col
             
             raw_clean = re.sub(r'[\s_.\-/]', '', col).strip().lower()
             column_map[raw_clean] = col
+            for variant in self._expand_key(col):
+                if variant and variant not in column_map:
+                    expanded_index.setdefault(variant, col)
 
         aligned_df = pd.DataFrame(index=df.index)
         missing_features: list[str] = []
@@ -252,6 +339,12 @@ class FeatureMapper:
                         break
                     if alias_val == key and target_key in column_map:
                         matched_col = column_map[target_key]
+                        break
+
+            if matched_col is None:
+                for variant in self._expand_key(feature_name):
+                    if variant in expanded_index:
+                        matched_col = expanded_index[variant]
                         break
 
             if matched_col is not None:

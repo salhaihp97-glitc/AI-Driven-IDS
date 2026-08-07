@@ -39,6 +39,7 @@ class DatabaseConnection:
         self._local: Final[threading.local] = threading.local()
         self._connections: Final[Set[sqlite3.Connection]] = set()
         self._connections_lock: Final[threading.Lock] = threading.Lock()
+        self._closed: bool = False
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -46,7 +47,13 @@ class DatabaseConnection:
         
         Raises:
             DatabaseError: If connection configurations fail or path assets are unreachable.
+            DatabaseError: If the connection pool has been terminated via ``close()``.
         """
+        if self._closed:
+            raise DatabaseError(
+                "Persistence boundary has been closed. Rejecting operation on a "
+                "terminated DatabaseConnection — restart the service to regain access."
+            )
         if getattr(self._local, "connection", None) is None:
             try:
                 # Enforce safe cross-thread evaluation and setup exact type resolution parsing
@@ -102,6 +109,7 @@ class DatabaseConnection:
         with self._connections_lock:
             conns = list(self._connections)
             self._connections.clear()
+            self._closed = True
         for conn in conns:
             try:
                 conn.close()

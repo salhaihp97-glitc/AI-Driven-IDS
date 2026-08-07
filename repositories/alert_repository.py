@@ -9,6 +9,7 @@ real-time statistics counts.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from typing import Final, Optional
 
 from config.constants import TableNames
@@ -83,18 +84,28 @@ class AlertRepository(BaseSQLiteRepository[Alert]):
         """
         if entity.id is None:
             raise RecordNotFoundError("Persistence Operations Fault: Cannot update an Alert lacking a valid id identifier.")
-            
+
+        # Preserve the domain-provided event timestamp (e.g. detection.created_at)
+        # instead of forcing wall-clock aggregation; fall back to now when unset.
+        last_seen_value: Final[Optional[str]] = (
+            entity.last_seen.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(entity.last_seen, datetime)
+            else entity.last_seen
+        )
+
         with self._db.cursor() as cur:
             cur.execute(
                 """
                 UPDATE alerts
-                SET occurrences = ?, last_seen = datetime('now'), is_acknowledged = ?, telegram_sent = ?
+                SET occurrences = ?, last_seen = COALESCE(?, datetime('now')),
+                    is_acknowledged = ?, telegram_sent = ?
                 WHERE id = ?
                 """,
                 (
-                    entity.occurrences, 
-                    int(entity.is_acknowledged), 
-                    int(entity.telegram_sent), 
+                    entity.occurrences,
+                    last_seen_value,
+                    int(entity.is_acknowledged),
+                    int(entity.telegram_sent),
                     entity.id
                 ),
             )

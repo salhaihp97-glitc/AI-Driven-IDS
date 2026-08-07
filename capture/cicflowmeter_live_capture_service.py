@@ -76,6 +76,10 @@ class LiveFlowRecord:
     source: str = "cicflowmeter"
     severity: str = ""
     attack_type: str = ""
+    attack_reason: str = ""
+    protocol: int = 0
+    is_whitelisted: bool = False
+    is_blacklisted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,7 @@ class CICFlowMeterLiveCaptureService:
         self._active_flows: int = 0
         self._model_id: Optional[int] = None
         self._model_name: str = ""
+        self._last_error: str = ""
 
         # scapy AsyncSniffer instance (created on start)
         self._sniffer: Any = None
@@ -183,6 +188,7 @@ class CICFlowMeterLiveCaptureService:
         self._model_name = model_name
         self._packet_count = 0
         self._active_flows = 0
+        self._last_error = ""
         self._master_header_written = (
             self._master_csv_path.exists() and self._master_csv_path.stat().st_size > 0
         )
@@ -333,6 +339,7 @@ class CICFlowMeterLiveCaptureService:
             "queue_backlog": len(self._completed_flows),
             "model_name": self._model_name,
             "mode": "cicflowmeter",
+            "last_error": self._last_error,
             "master_csv_size_bytes": (
                 self._master_csv_path.stat().st_size
                 if self._master_csv_path.exists()
@@ -375,7 +382,8 @@ class CICFlowMeterLiveCaptureService:
             count = self._packet_count
         try:
             self._flow_session.process(pkt)
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"FlowSession failed to process packet #{count}: {exc}"
             logger.exception("FlowSession failed to process packet #%d.", count)
 
         if count % 1000 == 0:
@@ -399,7 +407,8 @@ class CICFlowMeterLiveCaptureService:
         while not self._stop_event.wait(timeout=interval):
             try:
                 self._flush_completed_flows()
-            except Exception:
+            except Exception as exc:
+                self._last_error = f"Flush loop iteration failed: {exc}"
                 logger.exception("Flush loop iteration failed unexpectedly.")
 
     def _flush_completed_flows(self) -> None:
@@ -425,7 +434,8 @@ class CICFlowMeterLiveCaptureService:
                     "garbage_collect: %d flows expired (%d remaining in session).",
                     flushed_count, after_count,
                 )
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"FlowSession garbage_collect failed: {exc}"
             logger.exception("FlowSession garbage_collect failed.")
 
         # Drain the queue — all items that FlowSession has flushed
@@ -448,7 +458,8 @@ class CICFlowMeterLiveCaptureService:
             if df.empty:
                 return
             df.columns = df.columns.str.strip()
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"Failed to build DataFrame from completed flows: {exc}"
             logger.exception("Failed to build DataFrame from completed flows.")
             return
 
@@ -463,7 +474,8 @@ class CICFlowMeterLiveCaptureService:
                 )
                 self._master_header_written = True
             logger.info("Wrote %d raw flow records to master CSV.", len(df))
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"Failed to write raw flows to master CSV: {exc}"
             logger.exception("Failed to write raw flows to master CSV.")
 
         # 2. Sanitise for ML pipeline
@@ -471,10 +483,45 @@ class CICFlowMeterLiveCaptureService:
         df[numeric_cols] = df[numeric_cols].fillna(0.0)
         df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], 0.0)
 
-        # 3. Write cleaned flows to cleaned CSV
+        # 3. Run ML inference on the current batch ONLY (never the accumulated file),
+        #    then persist the sanitised batch with ML results to the cleaned CSV.
+        summary = None
+        if self._csv_analysis_service and self._model_id:
+            try:
+                batch_csv = self._cleaned_csv_path.with_name("cleaned_flows_batch.csv")
+                df.to_csv(batch_csv, index=False)
+                try:
+                    summary = self._csv_analysis_service.analyze(
+                        model_id=self._model_id,
+                        csv_path=str(batch_csv),
+                        source_type="live",
+                        skip_integration=False,
+                    )
+                    logger.info(
+                        "ML inference complete — Evaluated: %d | Attack: %d | Normal: %d",
+                        summary.total_rows,
+                        summary.attack_count,
+                        summary.normal_count,
+                    )
+                    self._append_recent_flows(summary, df)
+                finally:
+                    try:
+                        batch_csv.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Failed to remove live batch CSV '%s'.", batch_csv)
+            except Exception as exc:
+                self._last_error = f"ML inference pipeline failed for live flows: {exc}"
+                logger.exception("ML inference pipeline failed for live flows.")
+
+        # 4. Persist the sanitised batch to the cleaned CSV (with ML results when available)
         try:
             with self._lock:
-                df.to_csv(
+                cleaned_batch = df.copy()
+                if summary is not None and summary.results and len(summary.results) == len(df):
+                    cleaned_batch["prediction"] = [r.prediction for r in summary.results]
+                    cleaned_batch["confidence"] = [r.confidence for r in summary.results]
+                    cleaned_batch["attack_type"] = [r.attack_type for r in summary.results]
+                cleaned_batch.to_csv(
                     self._cleaned_csv_path,
                     mode="a",
                     header=not self._cleaned_header_written,
@@ -482,56 +529,48 @@ class CICFlowMeterLiveCaptureService:
                 )
                 self._cleaned_header_written = True
             logger.info("Wrote %d cleaned flow records to cleaned CSV.", len(df))
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"Failed to write cleaned flows to cleaned CSV: {exc}"
             logger.exception("Failed to write cleaned flows to cleaned CSV.")
-
-        # 4. ML inference
-        if self._csv_analysis_service and self._model_id:
-            try:
-                summary = self._csv_analysis_service.analyze(
-                    model_id=self._model_id,
-                    csv_path=str(self._cleaned_csv_path),
-                )
-                logger.info(
-                    "ML inference complete — Evaluated: %d | Attack: %d | Normal: %d",
-                    summary.total_rows,
-                    summary.attack_count,
-                    summary.normal_count,
-                )
-                self._append_recent_flows(summary)
-
-                # Write ML results (prediction, confidence, attack_type) back to cleaned CSV
-                try:
-                    df_results = pd.read_csv(self._cleaned_csv_path)
-                    if len(summary.results) == len(df_results):
-                        df_results["prediction"] = [r.prediction for r in summary.results]
-                        df_results["confidence"] = [r.confidence for r in summary.results]
-                        df_results["attack_type"] = [r.attack_type for r in summary.results]
-                        df_results.to_csv(self._cleaned_csv_path, index=False)
-                        logger.debug("Wrote ML results (prediction, confidence, attack_type) back to cleaned CSV.")
-                except Exception:
-                    logger.exception("Failed to write ML results back to cleaned CSV.")
-            except Exception:
-                logger.exception("ML inference pipeline failed for live flows.")
 
     # ------------------------------------------------------------------
     # Recent flows buffer
     # ------------------------------------------------------------------
 
-    def _append_recent_flows(self, summary) -> None:
+    def _append_recent_flows(self, summary, batch_df=None) -> None:
         with self._lock:
             if not hasattr(summary, "results") or not summary.results:
                 return
-            for result in summary.results:
+
+            protocol_col: Optional[str] = None
+            if batch_df is not None:
+                for col in batch_df.columns:
+                    if str(col).strip().lower() == "protocol":
+                        protocol_col = col
+                        break
+
+            protocols: List[int] = []
+            if protocol_col is not None:
+                protocols = [
+                    int(p) if pd.notnull(p) else 0
+                    for p in batch_df[protocol_col]
+                ]
+
+            for idx, result in enumerate(summary.results):
+                detection = getattr(result, "detection", None)
                 self._recent_flows.append(
                     LiveFlowRecord(
                         timestamp=time.time(),
-                        source_ip=getattr(result.detection, "source_ip", None),
-                        destination_ip=getattr(result.detection, "destination_ip", None),
+                        source_ip=getattr(detection, "source_ip", None),
+                        destination_ip=getattr(detection, "destination_ip", None),
                         model_name=self._model_name,
-                        prediction=getattr(result.detection, "prediction", 0),
-                        confidence=getattr(result.detection, "confidence", 0.0),
-                        severity=getattr(result.detection, "severity", ""),
+                        prediction=getattr(detection, "prediction", 0),
+                        confidence=getattr(detection, "confidence", 0.0),
+                        severity=getattr(detection, "severity", ""),
                         attack_type=getattr(result, "attack_type", ""),
+                        attack_reason=getattr(result, "attack_reason", ""),
+                        protocol=protocols[idx] if idx < len(protocols) else 0,
+                        is_whitelisted=bool(getattr(result, "is_whitelisted", False)),
+                        is_blacklisted=bool(getattr(result, "is_blacklisted", False)),
                     )
                 )

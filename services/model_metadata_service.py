@@ -138,12 +138,61 @@ class ModelMetadataService:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
 
+    def _load_scaler_feature_names(self) -> list[str]:
+        """
+        Reads the fitted feature footprint from the co-located ``scaler.joblib``.
+
+        Mirrors the runtime inference precedence in ``ml.model_loader``, where the
+        scaler's ``feature_names_in_`` is the ground-truth training-time column order.
+        Cached at instance level so the dashboard never reparses the artifact on
+        every render.
+        """
+        scaler_cache: list[str] | None = self.__dict__.get("_scaler_features")
+        if scaler_cache is not None:
+            return scaler_cache
+
+        names: list[str] = []
+        scaler_path: Final[Path] = self._models_dir / "scaler.joblib"
+        if scaler_path.exists():
+            try:
+                import joblib
+                scaler = joblib.load(scaler_path)
+                fitted: Any = getattr(scaler, "feature_names_in_", None)
+                if fitted is not None:
+                    names = list(fitted)
+            except Exception:  # noqa: BLE001 - best-effort fallback; never break the dashboard
+                logger.warning("Failed to read feature footprint from %s", scaler_path)
+        self.__dict__["_scaler_features"] = names
+        return names
+
+    def _resolve_feature_names(self, meta: dict[str, Any]) -> list[str]:
+        """
+        Resolves the model feature footprint with the same precedence as inference:
+        sidecar ``meta.json`` first, then the co-located scaler artifact.
+        """
+        feature_names: list[str] = meta.get("feature_names", [])
+        if feature_names:
+            return feature_names
+        scaler_names: list[str] = self._load_scaler_feature_names()
+        if scaler_names:
+            logger.warning(
+                "meta.json lacks feature_names — falling back to scaler.joblib footprint (%d features).",
+                len(scaler_names),
+            )
+            return scaler_names
+        return []
+
     # ── Public API ──────────────────────────────────────────────────────
 
     def get_classes(self) -> list[str]:
         """Return the ordered list of attack class labels."""
         data = self._load_eval_results()
         return data.get("classes", [])
+
+    def has_evaluation_data(self) -> bool:
+        """``True`` when a populated evaluation-results artifact exists on disk."""
+        data = self._load_eval_results()
+        return bool(data.get("classes")) or bool(data.get("random_forest")) or bool(data.get("xgboost"))
 
     def get_rf_profile(self) -> ModelProfile:
         """Build a complete Random Forest evaluation profile."""
@@ -206,10 +255,10 @@ class ModelMetadataService:
         model_data = data.get(key, {})
         classes = data.get("classes", [])
 
-        # Load feature names from meta.json
+        # Load feature names from meta.json (falling back to the scaler footprint)
         meta_file = f"{'random_forest_v3' if key == 'random_forest' else 'xgboost_pipeline_v2'}.joblib.meta.json"
         meta = self._load_meta_json(meta_file)
-        feature_names = meta.get("feature_names", [])
+        feature_names = self._resolve_feature_names(meta)
 
         # Parse per-class metrics
         report = model_data.get("report", {})

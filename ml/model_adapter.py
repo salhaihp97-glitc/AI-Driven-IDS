@@ -15,6 +15,9 @@ import numpy as np
 from ml.feature_schema import FeatureSchema
 from ml.interfaces import IModelAdapter
 
+# Canonical benign-class index used by every deployed CICIDS2017 model.
+BENIGN_CLASS_INDEX: Final[int] = 0
+
 
 class SklearnCompatibleModelAdapter(IModelAdapter):
     """
@@ -83,13 +86,23 @@ class SklearnCompatibleModelAdapter(IModelAdapter):
         """
         row_2d: Final[np.ndarray] = self._preprocess(feature_vector)
 
-        # When the estimator exposes continuous probabilities and the model is binary,
-        # apply the configurable decision threshold directly. At the default 0.5 this is
-        # arithmetically identical to the estimator's argmax boundary.
+        # Apply the configurable decision threshold as a real sensitivity knob.
+        # - Binary models: the standard P(attack) >= threshold boundary.
+        # - Multiclass models (e.g. the deployed 15-class CICIDS2017 models): the
+        #   generalized P(attack) = 1 - P(BENIGN). At the default threshold of 0.5
+        #   this is arithmetically identical to the estimator's argmax verdict, so
+        #   default behaviour is unchanged; raising the threshold makes the system
+        #   more conservative (fewer false positives) exactly as documented.
         if hasattr(self._estimator, "predict_proba"):
             probabilities = self._estimator.predict_proba(row_2d)[0]
             if len(probabilities) == 2:
                 return int(probabilities[1] >= self._decision_threshold)
+            p_benign: Final[float] = probabilities[BENIGN_CLASS_INDEX]
+            if 1.0 - p_benign < self._decision_threshold:
+                return BENIGN_CLASS_INDEX
+            # Declare the strongest non-benign class (BENIGN is always index 0).
+            attack_probabilities: Final[np.ndarray] = np.delete(probabilities, BENIGN_CLASS_INDEX)
+            return int(np.argmax(attack_probabilities)) + 1
 
         prediction = self._estimator.predict(row_2d)[0]
         return int(prediction)

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Optional
 
 import numpy as np
 import pandas as pd
 
+from capture.flow_models import FlowFeatures
 from config.settings import Settings, get_settings
 from core.exceptions import ValidationError
 from infrastructure.logging.logger_factory import get_logger
@@ -44,6 +45,14 @@ class CsvAnalysisSummary:
     results: list[DetectionResult]
 
 
+@dataclass
+class _RowUnit:
+    """Internal per-row extraction capsule used to feed macro assembly + inference."""
+    flow: FlowFeatures
+    source_ip: str
+    destination_ip: str
+
+
 class CsvAnalysisService:
     """
     Application core processor driving batch tabular security audits and ML feature vector extraction.
@@ -54,6 +63,7 @@ class CsvAnalysisService:
         detection_service: DetectionService,
         model_service: ModelService,
         settings: Settings | None = None,
+        macro_assembler: object | None = None,
     ) -> None:
         """
         Initializes the service with the mandatory core classification engine and model registry.
@@ -62,12 +72,24 @@ class CsvAnalysisService:
             detection_service: The core classification engine dispatching vector inferences.
             model_service: The model registry used to resolve display names.
             settings: Optional settings override (defaults to the process singleton).
+            macro_assembler: Optional ``MacroFlowAssembler`` (pure data engineering only).
         """
         self._detection_service: Final[DetectionService] = detection_service
         self._model_service: Final[ModelService] = model_service
         self._settings: Final[Settings] = settings or get_settings()
+        if macro_assembler is None:
+            from capture.macro_flow_assembler import MacroFlowAssembler
+            macro_assembler = MacroFlowAssembler()
+        self._assembler: Final[object] = macro_assembler
 
-    def analyze(self, model_id: int, csv_path: str, max_rows: int | None = None) -> CsvAnalysisSummary:
+    def analyze(
+        self,
+        model_id: int,
+        csv_path: str,
+        max_rows: int | None = None,
+        source_type: str = "csv",
+        skip_integration: bool = True,
+    ) -> CsvAnalysisSummary:
         """
         Parses a target text dataset to detect anomalies and evaluate network threat counts.
 
@@ -75,10 +97,22 @@ class CsvAnalysisService:
         ``max_rows`` argument and the ``AI_IDS_CSV_ANALYSIS_MAX_ROWS`` setting both act as
         optional truncation ceilings; a value of 0 or None means no cap.
 
+        When macro-flow assembly is enabled, raw rows are first aggregated into macro-flows
+        (pure data engineering that groups tiny flows sharing a key) so floods that are
+        invisible per-flow reach the model. Each macro-flow is then classified by the ML
+        model alone — no rule/statistical layer overrides the verdict. ``total_rows`` always
+        reports the number of raw rows audited, while ``results`` holds one DetectionResult
+        per classification unit (macro-flow when assembly is active, otherwise per-row).
+
         Args:
             model_id: Primary database identifier indexing the targeted inference model asset.
             csv_path: The file location path pointing to the raw dataset to audit.
             max_rows: Optional truncation ceiling to limit the total layout evaluation context.
+            source_type: Origin channel tag forwarded to the detection pipeline (defaults to
+                ``"csv"`` for file analysis; live capture passes ``"live"``).
+            skip_integration: When False, alerts and IP whitelist/blacklist enforcement are
+                active for these flows (used by live capture). File analysis keeps the default
+                ``True`` so verdicts stay pure ML outputs.
 
         Returns:
             A populated CsvAnalysisSummary compiling classification vectors and metrics.
@@ -121,6 +155,17 @@ class CsvAnalysisService:
                     dst_col = original_col
                     break
 
+        # Resolve optional identity columns (ports / protocol) for macro assembly keys.
+        def _find_column(candidates: set[str]) -> Optional[str]:
+            for c in candidates:
+                if c in columns_lower:
+                    return columns_lower[c]
+            return None
+
+        src_port_col = _find_column({"src port", "source port", "src_port", "source_port"})
+        dst_port_col = _find_column({"dst port", "destination port", "dst_port", "destination_port"})
+        protocol_col = _find_column({"protocol"})
+
         results: Final[list[DetectionResult]] = []
         attack_count: int = 0
         total_rows: int = 0
@@ -148,9 +193,7 @@ class CsvAnalysisService:
 
         logger.debug("Auditing CSV: columns %s | row cap %s | chunk size %d", columns, effective_cap, chunk_size)
 
-        # Fresh signature state so this file is audited independently of earlier batches
-        self._detection_service.reset_signatures()
-
+        units: list[_RowUnit] = []
         truncated: bool = False
         try:
             for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
@@ -178,23 +221,27 @@ class CsvAnalysisService:
                         source_ip = str(row[ip_col]).strip() if (ip_col and pd.notnull(row[ip_col])) else "Unknown"
                         destination_ip = str(row[dst_col]).strip() if (dst_col and pd.notnull(row[dst_col])) else "Unknown"
 
-                        # Dispatch normalized vector targets directly to the active traffic pipeline
-                        result = self._detection_service.run(
-                            model_id=model_id,
-                            raw_features=raw_features,
-                            source_type="csv",
-                            source_ip=source_ip,
-                            destination_ip=destination_ip,
-                            skip_integration=True,
-                        )
-                        results.append(result)
+                        def _row_int(col_name: Optional[str]) -> int:
+                            if col_name is None:
+                                return 0
+                            value = row.get(col_name)
+                            try:
+                                return int(float(value)) if pd.notnull(value) else 0
+                            except (TypeError, ValueError):
+                                return 0
 
-                        # Any non-zero prediction signature indicates a confirmed threat anomaly
-                        if result.detection is not None and result.detection.prediction != 0:
-                            attack_count += 1
+                        flow = FlowFeatures(
+                            src_ip=source_ip,
+                            dst_ip=destination_ip,
+                            src_port=_row_int(src_port_col),
+                            dst_port=_row_int(dst_port_col),
+                            protocol=_row_int(protocol_col),
+                            features=raw_features,
+                        )
+                        units.append(_RowUnit(flow=flow, source_ip=source_ip, destination_ip=destination_ip))
 
                     except Exception as e:
-                        logger.error("Skipping structural row vector configuration due to inference engine error: %s", e)
+                        logger.error("Skipping structural row vector configuration due to ingestion error: %s", e)
 
                 if truncated:
                     break
@@ -203,6 +250,37 @@ class CsvAnalysisService:
 
         if total_rows == 0:
             raise ValidationError("Data Evaluation Interrupted: The targeted CSV file structure contains no valid rows.")
+
+        # Aggregate raw rows into macro-flow classification units when assembly is enabled.
+        enabled_assembler = bool(getattr(self._assembler, "enabled", False))
+        if enabled_assembler:
+            macro_flows = list(self._assembler.assemble([u.flow for u in units]))
+            units = [
+                _RowUnit(flow=m, source_ip=m.src_ip, destination_ip=m.dst_ip)
+                for m in macro_flows
+            ]
+            logger.info("Macro-flow assembly active: %d raw rows -> %d macro-flow units.", total_rows, len(units))
+
+        # Dispatch normalized vector targets directly to the active traffic pipeline.
+        # The model is the sole authority: no rule/statistical layer overrides its verdict.
+        for unit in units:
+            try:
+                result = self._detection_service.run(
+                    model_id=model_id,
+                    raw_features=unit.flow.features,
+                    source_type=source_type,
+                    source_ip=unit.source_ip,
+                    destination_ip=unit.destination_ip,
+                    skip_integration=skip_integration,
+                )
+                results.append(result)
+
+                # Any non-zero prediction signature indicates a confirmed threat anomaly
+                if result.detection is not None and result.detection.prediction != 0:
+                    attack_count += 1
+
+            except Exception as e:
+                logger.error("Skipping structural row vector configuration due to inference engine error: %s", e)
 
         logger.info(
             "Tabular ingestion complete. Audited: %d rows (model: %s). Malicious anomalies: %d",

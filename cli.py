@@ -320,17 +320,11 @@ def run_setup_wizard() -> bool:
 
     # ── Step 6: Network Capture ───────────────────────────────────────
     _subheading(f"Step 6/{_SETUP_STEPS}: Network Capture Settings")
-    live_choice = _prompt(
-        "Live capture engine (1=Native, 2=CICFlowMeter)",
-        "1" if values["AI_IDS_LIVE_CAPTURE_MODE"] == "native" else "2",
-    )
-    values["AI_IDS_LIVE_CAPTURE_MODE"] = "cicflowmeter" if live_choice == "2" else "native"
-
-    ext_choice = _prompt(
-        "Offline flow extractor (1=Native, 2=CICFlowMeter)",
-        "1" if values["AI_IDS_FLOW_EXTRACTOR"] == "native" else "2",
-    )
-    values["AI_IDS_FLOW_EXTRACTOR"] = "cicflowmeter" if ext_choice == "2" else "native"
+    # CICFlowMeter (pure-Python) is the sole flow-extraction backend for both
+    # live capture and offline PCAP analysis; there is no alternative engine.
+    values["AI_IDS_LIVE_CAPTURE_MODE"] = "cicflowmeter"
+    values["AI_IDS_FLOW_EXTRACTOR"] = "cicflowmeter"
+    print("  Flow engine   : CICFlowMeter (pure-Python) — the only supported backend.")
 
     values["AI_IDS_FLOW_IDLE_TIMEOUT"] = _prompt(
         "Flow idle timeout (seconds)", values["AI_IDS_FLOW_IDLE_TIMEOUT"]
@@ -354,7 +348,7 @@ def run_setup_wizard() -> bool:
     print(f"  Logs dir      : {values['AI_IDS_LOGS_DIR']}")
     print(f"  Log level     : {values['AI_IDS_LOG_LEVEL']}")
     print(f"  Bcrypt rounds : {values['AI_IDS_BCRYPT_ROUNDS']}")
-    print(f"  Flow extractor: {values['AI_IDS_FLOW_EXTRACTOR']}")
+    print(f"  Flow extractor: CICFlowMeter (sole backend)")
     tg_status = "configured" if values.get("AI_IDS_TELEGRAM_BOT_TOKEN") else "not configured"
     print(f"  Telegram      : {tg_status}")
     print()

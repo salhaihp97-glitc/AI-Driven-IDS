@@ -91,6 +91,13 @@ class TelegramJoinPoller:
         """Monotonic timestamp of the last successful ``getUpdates`` round, or 0.0."""
         return self._last_poll_at
 
+    def _safe(self, message: str) -> str:
+        """Redact the live bot token from a message before it reaches logs/UI."""
+        token: str = self._notifier.bot_token
+        if not token:
+            return message
+        return message.replace(token, "***REDACTED***")
+
     def start(self) -> bool:
         """
         Spawns the long-polling worker thread if it is not already running.
@@ -141,8 +148,11 @@ class TelegramJoinPoller:
             try:
                 offset = self._poll_once(offset)
             except Exception:  # noqa: BLE001 - Poller must never die from a malformed update
-                self._last_error = traceback.format_exc(limit=2)
-                logger.exception("Telegram join poller round failed.")
+                # Transport exceptions embed the full request URL (containing the bot
+                # token). Redact before persisting or logging to avoid credential leaks.
+                safe_traceback: str = self._safe(traceback.format_exc(limit=2))
+                self._last_error = safe_traceback
+                logger.warning("Telegram join poller round failed: %s", safe_traceback.splitlines()[-1] if safe_traceback else "unknown error")
             self._stop.wait(self._poll_interval)
 
     def _poll_once(self, offset: int) -> int:

@@ -282,7 +282,6 @@ class Container:
                 settings=get_settings(),
             )
         return self._csv_analysis_service
-
     @property
     def pcap_analysis_service(self) -> PcapAnalysisService:
         """Resolves the raw wire network pcap capture format analytical decoding service."""

@@ -16,21 +16,21 @@ import streamlit as st
 
 from config.settings import get_settings
 from services.container import get_container
-from services.model_metadata_service import ModelMetadataService, ModelProfile
+from services.model_metadata_service import ModelProfile
 from ui.auth_guard import require_login
 
 require_login()
 st.set_page_config(page_title="Model Evaluation", layout="wide")
 st.title("Model Evaluation & Comparison Dashboard")
 
-meta_service = ModelMetadataService()
 container = get_container()
+meta_service = container.model_metadata_service
 
 profiles = meta_service.get_all_profiles()
 comparison = meta_service.get_comparison()
 classes = meta_service.get_classes()
 
-if not profiles:
+if not meta_service.has_evaluation_data():
     st.warning("No evaluation data found. Run model evaluation first.")
     st.stop()
 

@@ -47,7 +47,7 @@ DEFAULT_ENV_VARS: Final[dict[str, str]] = {
     "AI_IDS_TELEGRAM_CHAT_ID": "",
     "AI_IDS_ALERT_WINDOW_MINUTES": "10",
     "AI_IDS_FLOW_IDLE_TIMEOUT": "15",
-    "AI_IDS_LIVE_CAPTURE_MODE": "native",
+    "AI_IDS_LIVE_CAPTURE_MODE": "cicflowmeter",
     "AI_IDS_CICFLOWMETER_INTERVAL_SECONDS": "10",
     "AI_IDS_CICFLOWMETER_EXPIRED_UPDATE_SECONDS": "10",
     "AI_IDS_LIVE_FLUSH_POLL_SECONDS": "2.0",
@@ -58,20 +58,19 @@ DEFAULT_ENV_VARS: Final[dict[str, str]] = {
     "AI_IDS_LIVE_FLOWS_LIMIT": "200",
     "AI_IDS_FLOW_ACTIVITY_TIMEOUT_SECONDS": "5.0",
     "AI_IDS_MONITORING_INTERVAL": "5",
-    "AI_IDS_FLOW_EXTRACTOR": "native",
-    "AI_IDS_SIG_ENGINE_ENABLED": "true",
-    "AI_IDS_SIG_SYN_FLOOD_MIN_SYN": "50",
-    "AI_IDS_SIG_SYN_FLOOD_MAX_PAYLOAD_BYTES": "500",
-    "AI_IDS_SIG_SYN_FLOOD_MIN_FWD_SYN_RATIO": "0.8",
-    "AI_IDS_SIG_PORT_SCAN_MIN_DST_PORTS": "40",
-    "AI_IDS_SIG_PORT_SCAN_WINDOW_SECONDS": "60",
-    "AI_IDS_SIG_PORT_SCAN_COOLDOWN_SECONDS": "300",
-    "AI_IDS_SIG_CONFIDENCE": "0.9",
-    "AI_IDS_SIG_LOW_CONFIDENCE_BENIGN_THRESHOLD": "0.0",
+    "AI_IDS_FLOW_EXTRACTOR": "cicflowmeter",
     "AI_IDS_CSV_ANALYSIS_MAX_ROWS": "0",
     "AI_IDS_CSV_ANALYSIS_CHUNK_SIZE": "10000",
     "AI_IDS_ML_DECISION_THRESHOLD": "0.5",
     "AI_IDS_ML_MIN_FEATURE_COVERAGE": "0.5",
+    # --- Macro-Flow Assembly (pure data pipeline -> feeds the model only) ---
+    # Disabled by default: the deployed per-flow CICIDS2017 models (RF V3 / XGB V2)
+    # are trained on individual flow rows, so aggregation changes the feature space.
+    # Turn on only for models trained on macro-aggregate features.
+    "AI_IDS_MACRO_FLOW_ENABLED": "false",
+    "AI_IDS_MACRO_FLOW_WINDOW_SECONDS": "10.0",
+    "AI_IDS_MACRO_FLOW_KEY_FIELDS": "src_ip,dst_ip,dst_port,protocol",
+    "AI_IDS_MACRO_FLOW_MIN_MEMBERS": "2",
 }
 
 # Placeholder secret used when no key has been configured yet. It is deliberately
@@ -190,6 +189,7 @@ class Settings:
     # --- Live Capture Pipeline Control Directives ---
     flow_idle_timeout_seconds: int = field(default_factory=lambda: _get_int("AI_IDS_FLOW_IDLE_TIMEOUT", _env_int("AI_IDS_FLOW_IDLE_TIMEOUT")))
     live_capture_mode: str = field(default_factory=lambda: _env("AI_IDS_LIVE_CAPTURE_MODE").strip().lower())
+    flow_extractor_mode: str = field(default_factory=lambda: _env("AI_IDS_FLOW_EXTRACTOR").strip().lower() or "cicflowmeter")
     cicflowmeter_interval_seconds: int = field(default_factory=lambda: _get_int("AI_IDS_CICFLOWMETER_INTERVAL_SECONDS", _env_int("AI_IDS_CICFLOWMETER_INTERVAL_SECONDS")))
     cicflowmeter_expired_update_seconds: int = field(default_factory=lambda: _get_int("AI_IDS_CICFLOWMETER_EXPIRED_UPDATE_SECONDS", _env_int("AI_IDS_CICFLOWMETER_EXPIRED_UPDATE_SECONDS")))
     monitoring_poll_interval_seconds: int = field(
@@ -205,20 +205,6 @@ class Settings:
     live_ui_poll_interval: float = field(default_factory=lambda: _get_float("AI_IDS_LIVE_UI_POLL_INTERVAL", _env_float("AI_IDS_LIVE_UI_POLL_INTERVAL")))
     live_flows_limit: int = field(default_factory=lambda: _get_int("AI_IDS_LIVE_FLOWS_LIMIT", _env_int("AI_IDS_LIVE_FLOWS_LIMIT")))
 
-    # --- Detection Signature Augmentation (Out-of-Distribution Coverage) ---
-    # Catches well-understood attack patterns that CICIDS2017-trained models cannot
-    # generalize to (e.g., loopback SYN floods with zero payload). All thresholds are
-    # environment-driven so sensitivity is tunable without code changes.
-    signature_engine_enabled: bool = field(default_factory=lambda: _get_bool("AI_IDS_SIG_ENGINE_ENABLED", _env_bool("AI_IDS_SIG_ENGINE_ENABLED")))
-    signature_syn_flood_min_syn: int = field(default_factory=lambda: _get_int("AI_IDS_SIG_SYN_FLOOD_MIN_SYN", _env_int("AI_IDS_SIG_SYN_FLOOD_MIN_SYN")))
-    signature_syn_flood_max_payload_bytes: int = field(default_factory=lambda: _get_int("AI_IDS_SIG_SYN_FLOOD_MAX_PAYLOAD_BYTES", _env_int("AI_IDS_SIG_SYN_FLOOD_MAX_PAYLOAD_BYTES")))
-    signature_syn_flood_min_fwd_syn_ratio: float = field(default_factory=lambda: _get_float("AI_IDS_SIG_SYN_FLOOD_MIN_FWD_SYN_RATIO", _env_float("AI_IDS_SIG_SYN_FLOOD_MIN_FWD_SYN_RATIO")))
-    signature_port_scan_min_dst_ports: int = field(default_factory=lambda: _get_int("AI_IDS_SIG_PORT_SCAN_MIN_DST_PORTS", _env_int("AI_IDS_SIG_PORT_SCAN_MIN_DST_PORTS")))
-    signature_port_scan_window_seconds: float = field(default_factory=lambda: _get_float("AI_IDS_SIG_PORT_SCAN_WINDOW_SECONDS", _env_float("AI_IDS_SIG_PORT_SCAN_WINDOW_SECONDS")))
-    signature_port_scan_cooldown_seconds: float = field(default_factory=lambda: _get_float("AI_IDS_SIG_PORT_SCAN_COOLDOWN_SECONDS", _env_float("AI_IDS_SIG_PORT_SCAN_COOLDOWN_SECONDS")))
-    signature_confidence: float = field(default_factory=lambda: _get_float("AI_IDS_SIG_CONFIDENCE", _env_float("AI_IDS_SIG_CONFIDENCE")))
-    signature_low_confidence_benign_threshold: float = field(default_factory=lambda: _get_float("AI_IDS_SIG_LOW_CONFIDENCE_BENIGN_THRESHOLD", _env_float("AI_IDS_SIG_LOW_CONFIDENCE_BENIGN_THRESHOLD")))
-
     # --- Batch CSV Analysis Resource Boundaries ---
     # 0 means the entire file is analyzed (no row cap). A positive value caps how many
     # rows are audited. The chunk size keeps streaming reads memory-safe on large files.
@@ -231,6 +217,15 @@ class Settings:
     # environment-driven so detection strictness is tunable without code changes.
     ml_decision_threshold: float = field(default_factory=lambda: _get_float("AI_IDS_ML_DECISION_THRESHOLD", _env_float("AI_IDS_ML_DECISION_THRESHOLD")))
     ml_min_feature_coverage: float = field(default_factory=lambda: _get_float("AI_IDS_ML_MIN_FEATURE_COVERAGE", _env_float("AI_IDS_ML_MIN_FEATURE_COVERAGE")))
+
+    # --- Macro-Flow Assembly (pure data pipeline, feeds the model only) ---
+    # Combines many small flows sharing a five-ish-tuple key over a time window into a
+    # single macro-flow carrying the true aggregate statistics, so the model can observe
+    # floods (e.g. rotating-source-port SYN floods) that are invisible at per-flow level.
+    macro_flow_enabled: bool = field(default_factory=lambda: _get_bool("AI_IDS_MACRO_FLOW_ENABLED", _env_bool("AI_IDS_MACRO_FLOW_ENABLED")))
+    macro_flow_window_seconds: float = field(default_factory=lambda: _get_float("AI_IDS_MACRO_FLOW_WINDOW_SECONDS", _env_float("AI_IDS_MACRO_FLOW_WINDOW_SECONDS")))
+    macro_flow_key_fields: str = field(default_factory=lambda: _env("AI_IDS_MACRO_FLOW_KEY_FIELDS"))
+    macro_flow_min_members: int = field(default_factory=lambda: _get_int("AI_IDS_MACRO_FLOW_MIN_MEMBERS", _env_int("AI_IDS_MACRO_FLOW_MIN_MEMBERS")))
 
     @staticmethod
     def resolve_model_path(path_or_filename: str) -> Path:

@@ -207,6 +207,55 @@ class TestModelLoader:
         # العتبة المرتفعة 0.9 > 0.6 → لا يُصنّف كهجوم
         assert strict_adapter.predict(vector) == 0
 
+    def test_sklearn_adapter_multiclass_threshold_is_real(self) -> None:
+        """
+        NFR-ML-03: على النماذج متعددة الفئات (15 فئة CICIDS2017) تعمل عتبة القرار
+        فعليًا كبوابة على P(attack)=1-P(BENIGN): عند 0.5 مطابقة لـ argmax، وعند رفعها
+        تُنزَّل العينات قليلة الثقة إلى BENIGN.
+        """
+        class PAttack060:
+            # argmax هو فئة الهجوم 1 باحتمال 0.60 (P_attack = 1 - 0.40 = 0.60)
+            def predict_proba(self, X):
+                return np.array([[0.40, 0.60]])
+
+            def predict(self, X):
+                return np.array([1])
+
+        class PAttack045:
+            # BENIGN 0.55 هو الأرجح (argmax)، وP_attack = 1 - 0.55 = 0.45 < 0.5
+            def predict_proba(self, X):
+                return np.array([[0.55, 0.10, 0.35]])
+
+            def predict(self, X):
+                return np.array([2])
+
+        class PAttack085:
+            # argmax هو فئة الهجوم 3 باحتمال 0.85 (P_attack = 0.90)
+            def predict_proba(self, X):
+                return np.array([[0.10, 0.05, 0.05, 0.80]])
+
+            def predict(self, X):
+                return np.array([3])
+
+        schema = FeatureSchema(feature_names=["A", "B"], model_type="random_forest")
+        vector = np.array([1.0, 2.0])
+
+        # P_attack 0.45 < عتبة 0.5 → تُنزل إلى الفئة الحميدة (0)
+        low = SklearnCompatibleModelAdapter(PAttack045(), schema, decision_threshold=0.5)
+        assert low.predict(vector) == 0
+
+        # P_attack 0.60 >= 0.5 → تُعلن أقوى فئة هجوم (1)
+        std = SklearnCompatibleModelAdapter(PAttack060(), schema, decision_threshold=0.5)
+        assert std.predict(vector) == 1
+
+        # P_attack 0.90 >= 0.5 → تُعلن فئة الهجوم القصوى (3)
+        high = SklearnCompatibleModelAdapter(PAttack085(), schema, decision_threshold=0.5)
+        assert high.predict(vector) == 3
+
+        # عتبة مرتفعة 0.95 > P_attack 0.90 → تنزيل إلى BENIGN رغم أن predict() يرجّع 3
+        strict = SklearnCompatibleModelAdapter(PAttack085(), schema, decision_threshold=0.95)
+        assert strict.predict(vector) == 0
+
 
 # ================================================================================
 # القسم 3: اختبارات FeatureMapper — راسم الخصائص
@@ -284,6 +333,73 @@ class TestFeatureMapper:
         mapper = FeatureMapper()
         with pytest.raises(ValidationError):
             mapper.validate_minimum_coverage({}, ["A", "B"], min_coverage=0.1)
+
+    def test_dynamic_snake_case_expansion_maps_cicflowmeter_columns(self) -> None:
+        """
+        FR-ML-02: توجيه البرمجة — أسماء أعمدة CICFlowMeter بصيغة snake_case
+        (الاختصارات) يجب أن تُعيّن ديناميكيًا إلى أسماء النماذج الأكاديمية بدون
+        تصفير (zero-fill) للحقول الصحيحة.
+        """
+        mapper = FeatureMapper()
+        available = {
+            "Flow Duration": 12000.0,
+            "Tot Fwd Pkts": 10.0,
+            "Fwd Pkt Len Max": 1400.0,
+            "Fwd Pkt Len Mean": 400.0,
+            "Fwd Seg Size Avg": 512.0,
+            "Bwd Seg Size Avg": 256.0,
+            "Tot Len Fwd Pkts": 14000.0,
+            "Flow Byts/s": 5000.0,
+            "Flow Pkts/s": 100.0,
+            "SYN Flag Count": 3.0,
+        }
+        required = [
+            "Total Fwd Packets",
+            "Fwd Packet Length Max",
+            "Fwd Packet Length Mean",
+            "Avg Fwd Segment Size",
+            "Avg Bwd Segment Size",
+            "Total Length of Fwd Packets",
+            "Flow Bytes/s",
+            "Flow Packets/s",
+            "SYN Flag Count",
+        ]
+        vector, missing = mapper.map_with_report(available, required)
+        assert missing == []
+        expected = [10.0, 1400.0, 400.0, 512.0, 256.0, 14000.0, 5000.0, 100.0, 3.0]
+        for got, want in zip(vector, expected):
+            assert got == want, f"expected {want} but got {got}"
+
+    def test_dynamic_expansion_prevents_zero_fill_for_unlisted_alias(self) -> None:
+        """
+        FR-ML-02: اختصار snake_case غير مُدرج في جدول _aliases الثابت يجب أن
+        يُعيّن عبر طبقة التوسع البرمجية بدلاً من التصفير الصامت.
+        """
+        mapper = FeatureMapper()
+        available = {"Fwd Seg Size Avg": 1024.0}
+        required = ["Avg Fwd Segment Size"]
+        vector, missing = mapper.map_with_report(available, required)
+        assert missing == []
+        assert vector[0] == 1024.0
+
+    def test_dynamic_expansion_dataframe_no_missing(self) -> None:
+        """
+        FR-ML-02: نفس الضمان لمُعيّن DataFrame — لا يجب أن تظهر أعمدة snake_case
+        صحيحة كمفقودة ولا أن تُصفّر قيمها.
+        """
+        import pandas as pd
+
+        mapper = FeatureMapper()
+        df = pd.DataFrame(
+            [{"flow_duration": 100.0, "tot_fwd_pkts": 7.0, "flow_byts_s": 3000.0}]
+        )
+        required = ["Flow Duration", "Total Fwd Packets", "Flow Bytes/s"]
+        result, missing = mapper.map_dataframe_with_report(df, required)
+        assert missing == []
+        row = result.iloc[0]
+        assert row["Flow Duration"] == 100.0
+        assert row["Total Fwd Packets"] == 7.0
+        assert row["Flow Bytes/s"] == 3000.0
 
 
 # ================================================================================

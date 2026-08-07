@@ -857,32 +857,30 @@ class TestTestabilityNFR:
         assert eval_result.prediction_time_ms >= 0
         assert eval_result.model_name == "nfr-test-model"
 
-    def test_testable_capture_pipeline_callable(self, container: Container) -> None:
+    def test_testable_capture_pipeline_callable(self, tmp_path: Path) -> None:
         """
-        NFR-TEST-01: خدمة التقاط التدفقات يجب أن تكون قابلة للاستدعاء.
+        NFR-TEST-01: خدمة استخراج التدفقات (CICFlowMeter) يجب أن تكون قابلة للاستدعاء.
         """
-        from capture.flow_assembler import FlowAssembler
-        from capture.flow_feature_calculator import FlowFeatureCalculator
+        from capture.cicflowmeter_adapter import CICFlowMeterAdapter
+        from scapy.all import IP, TCP, Ether, wrpcap
 
-        assembler = FlowAssembler(idle_timeout_seconds=5.0)
-        assembler.add_packet(
-            src_ip="10.0.0.1", dst_ip="10.0.0.2",
-            src_port=12345, dst_port=80, protocol=6,
-            timestamp=time.time(), size_bytes=100, syn=True,
-        )
-        assembler.add_packet(
-            src_ip="10.0.0.2", dst_ip="10.0.0.1",
-            src_port=80, dst_port=12345, protocol=6,
-            timestamp=time.time() + 0.1, size_bytes=200, syn=True, ack=True,
-        )
-        flows = assembler.flush_all()
+        packets = [
+            Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=12345, dport=80, flags="S"),
+            Ether() / IP(src="10.0.0.2", dst="10.0.0.1") / TCP(sport=80, dport=12345, flags="SA"),
+            Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=12345, dport=80, flags="A"),
+        ]
+        pcap_path = tmp_path / "nfr_capture.pcap"
+        wrpcap(str(pcap_path), packets)
+
+        extractor = CICFlowMeterAdapter()
+        flows = extractor.extract_from_pcap(str(pcap_path))
         assert len(flows) >= 1
 
-        calc = FlowFeatureCalculator()
-        features = calc.compute(flows[0])
+        features = flows[0]
         assert features is not None
         assert hasattr(features, "features")
         assert isinstance(features.features, dict)
+        assert len(features.features) > 0
 
     def test_testable_csv_service_end_to_end(self, container: Container, registered_model: ModelRecord, tmp_path: Path) -> None:
         """
@@ -904,35 +902,28 @@ class TestTestabilityNFR:
         assert len(summary.results) == 2
         assert all(isinstance(r, DetectionResult) for r in summary.results)
 
-    def test_testable_pcap_service_with_synthetic_flows(self, container: Container, registered_model: ModelRecord) -> None:
+    def test_testable_pcap_service_with_synthetic_flows(self, container: Container, registered_model: ModelRecord, tmp_path: Path) -> None:
         """
-        NFR-TEST-01: يمكن اختبار مسار PCAP باستخدام تدفقات اصطناعية.
+        NFR-TEST-01: يمكن اختبار مسار PCAP end-to-end باستخدام تدفقات اصطناعية
+        عبر محرك CICFlowMeter (المحرك الوحيد للاستخراج).
         """
-        from capture.flow_assembler import FlowAssembler
-        from capture.flow_feature_calculator import FlowFeatureCalculator
+        from scapy.all import IP, TCP, Ether, wrpcap
 
-        assembler = FlowAssembler(idle_timeout_seconds=2.0)
+        packets = []
         for i in range(3):
-            assembler.add_packet(
-                src_ip=f"10.0.0.{i}", dst_ip="10.0.0.99",
-                src_port=10000 + i, dst_port=80, protocol=6,
-                timestamp=time.time() + i * 0.1, size_bytes=64, syn=True,
+            packets.append(
+                Ether() / IP(src=f"10.0.0.{i}", dst="10.0.0.99") / TCP(sport=10000 + i, dport=80, flags="S")
             )
-            assembler.add_packet(
-                src_ip="10.0.0.99", dst_ip=f"10.0.0.{i}",
-                src_port=80, dst_port=10000 + i, protocol=6,
-                timestamp=time.time() + i * 0.1 + 0.05, size_bytes=128, syn=True, ack=True,
+            packets.append(
+                Ether() / IP(src="10.0.0.99", dst=f"10.0.0.{i}") / TCP(sport=80, dport=10000 + i, flags="SA")
             )
+        pcap_path = tmp_path / "nfr_synthetic.pcap"
+        wrpcap(str(pcap_path), packets)
 
-        flows = assembler.flush_all()
-        assert len(flows) >= 1
-
-        calc = FlowFeatureCalculator()
-        for flow in flows:
-            features = calc.compute(flow)
-            assert features is not None
-            assert isinstance(features.features, dict)
-            assert len(features.features) > 0
+        summary = container.pcap_analysis_service.analyze(registered_model.id, str(pcap_path))
+        assert summary.total_flows >= 1
+        assert len(summary.results) == summary.total_flows
+        assert all(r.detection is not None for r in summary.results)
 
 
 # ================================================================================

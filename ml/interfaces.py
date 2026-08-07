@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from capture.flow_feature_calculator import FlowFeatures
+    from capture.flow_models import FlowFeatures
 
 
 class IModelAdapter(ABC):

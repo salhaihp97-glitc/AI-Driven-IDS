@@ -133,28 +133,35 @@ class ModelEvaluationService:
 
         prediction_time_ms: Final[float] = (time.perf_counter() - predict_start) * 1000.0
 
-        # 3. Derive core confusion matrix quadrants safely
-        cm = confusion_matrix(y_true, predictions, labels=[0, 1])
-        if cm.shape == (2, 2):
-            tn, fp, fn, tp = cm.ravel()
-        else:
-            tn = fp = fn = tp = 0
+        # 3. Derive a consistent binary attack-vs-benign axis.
+        #
+        # Deployed CICIDS2017 adapters emit multiclass indices (0 = BENIGN,
+        # 1..14 = specific attack families). Collapsing every non-benign class
+        # to 1 keeps detection-oriented metrics (accuracy, precision, recall,
+        # F1, MCC, and the confusion-matrix quadrants) truthful and crash-free
+        # regardless of the evaluation dataset's label cardinality, instead of
+        # silently discarding attack classes 2-14 in a truncated 2x2 matrix.
+        y_true_binary: Final[np.ndarray] = (y_true != 0).astype(int)
+        predictions_binary: Final[np.ndarray] = (predictions != 0).astype(int)
+
+        cm: Final[np.ndarray] = confusion_matrix(y_true_binary, predictions_binary, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
 
         # 4. Compute specialized security performance rates (False Positive & False Negative Rates)
         fpr: Final[float] = float(fp / (tn + fp)) if (tn + fp) > 0 else 0.0
         fnr: Final[float] = float(fn / (tp + fn)) if (tp + fn) > 0 else 0.0
 
         # 5. Calculate Matthews Correlation Coefficient indicators (robust to class imbalances)
-        mcc: Final[float] = float(matthews_corrcoef(y_true, predictions))
+        mcc: Final[float] = float(matthews_corrcoef(y_true_binary, predictions_binary))
 
         # 6. Evaluate Area Under ROC Curve safely ignoring single-class or missing probability layouts
         roc_auc: float | None = None
-        if len(np.unique(y_true)) > 1 and confidences is not None:
+        if len(np.unique(y_true_binary)) > 1 and confidences is not None:
             try:
                 if confidences.ndim == 1:
-                    roc_auc = float(roc_auc_score(y_true, confidences))
+                    roc_auc = float(roc_auc_score(y_true_binary, confidences))
                 elif confidences.ndim == 2:
-                    roc_auc = float(roc_auc_score(y_true, confidences, multi_class='ovr', average='weighted'))
+                    roc_auc = float(roc_auc_score(y_true_binary, confidences, multi_class='ovr', average='weighted'))
             except Exception:
                 roc_auc = None
 
@@ -164,10 +171,10 @@ class ModelEvaluationService:
 
         return EvaluationResult(
             model_name=model_record.name,
-            accuracy=float(accuracy_score(y_true, predictions)),
-            precision=float(precision_score(y_true, predictions, zero_division=0)),
-            recall=float(recall_score(y_true, predictions, zero_division=0)),
-            f1=float(f1_score(y_true, predictions, zero_division=0)),
+            accuracy=float(accuracy_score(y_true_binary, predictions_binary)),
+            precision=float(precision_score(y_true_binary, predictions_binary, zero_division=0)),
+            recall=float(recall_score(y_true_binary, predictions_binary, zero_division=0)),
+            f1=float(f1_score(y_true_binary, predictions_binary, zero_division=0)),
             roc_auc=roc_auc,
             fpr=fpr,
             fnr=fnr,

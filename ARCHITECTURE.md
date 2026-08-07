@@ -76,10 +76,9 @@ block-beta
     space
 
     block:Capture["Network Capture Layer"]
-        columns 3
-        NCS["NativeCaptureService\n(PacketSniffer + FlowAssembler\n+ FlowFeatureCalculator)"]
+        columns 2
         CIC["CICFlowMeterCaptureService\n(FlowSession + scapy\n+ QueueWriter + GC)"]
-        IFE["IFlowExtractor\n(NativeFlowExtractor\n+ CICFlowMeterAdapter)"]
+        IFE["IFlowExtractor\n(CICFlowMeterAdapter\nFlowFeatures)"]
     end
 
     space
@@ -120,7 +119,7 @@ block-beta
 | **Presentation** | Interactive web UI via Streamlit | 12 multi-page views, auth guard |
 | **Services** | Business logic, orchestration, validation | DetectionService, AlertEngine, ModelService, AuthService |
 | **ML** | Model loading, inference, feature alignment | ModelLoader, IModelAdapter, FeatureMapper, FeatureSchema |
-| **Capture** | Packet sniffing, flow assembly, feature extraction | PacketSniffer, FlowAssembler, FlowFeatureCalculator, CICFlowMeter |
+| **Capture** | Packet sniffing, flow assembly, feature extraction | CICFlowMeterLiveCaptureService, CICFlowMeterAdapter, FlowFeatures |
 | **Repositories** | Data access abstraction over SQLite | 8 typed repository classes |
 | **Infrastructure** | Cross-cutting concerns | SQLite persistence, Telegram notifications, password hashing, structured logging |
 
@@ -231,7 +230,7 @@ flowchart LR
     subgraph Extraction["Feature Extraction"]
         CE["CSV Parser\n(raw_features dict)"]
         PE["IFlowExtractor\n(FlowFeatures)"]
-        FE["FlowAssembler +\nFlowFeatureCalculator\n(70 features)"]
+        FE["CICFlowMeter\nFlowSession\n(70 features)"]
     end
 
     subgraph Alignment["Feature Alignment"]
@@ -455,34 +454,31 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant UI as Streamlit UI
-    participant LCS as LiveCaptureService
-    participant PS as PacketSniffer
-    participant FA as FlowAssembler
-    participant FFC as FlowFeatureCalculator
+    participant LCS as CICFlowMeterLiveCaptureService
+    participant AS as AsyncSniffer
+    participant FS as cicflowmeter.FlowSession
+    participant QW as _QueueWriter
     participant DS as DetectionService
     participant CSV as CSV Writer
 
     UI->>LCS: start(interface, model_id, model_name)
-    LCS->>PS: start(interface)
+    LCS->>AS: start(interface)
     
     loop Every captured packet
-        PS->>FA: add_packet(src_ip, dst_ip, ports, protocol, ...)
-        Note over FA: Groups packets into bidirectional flows<br/>by canonical 5-tuple key
+        AS->>LCS: _on_packet(pkt)
+        LCS->>FS: process(pkt)
+        Note over FS: Assembles bidirectional flows,<br/>GC expired flows to writer
+        FS-->>QW: flow.get_data()
     end
     
     loop Every 2 seconds (flush_loop)
-        LCS->>FA: pop_idle_flows(now)
-        FA-->>LCS: list[Flow]
-        
-        loop Per idle flow
-            LCS->>FFC: compute(flow)
-            FFC-->>LCS: FlowFeatures(features: dict[70])
-            LCS->>DS: run(model_id, features, "live")
-            DS-->>LCS: DetectionResult
-            Note over LCS: Creates LiveFlowRecord with<br/>prediction, confidence, severity, attack_type
-        end
-        
-        LCS->>CSV: _write_flows_to_csv(records)
+        LCS->>FS: garbage_collect(time.time())
+        LCS->>QW: drain completed_flows
+        Note over LCS: Batch ML inference via<br/>CsvAnalysisService.analyze()
+        LCS->>DS: analyze(batch CSV)
+        DS-->>LCS: CsvAnalysisSummary
+        Note over LCS: Creates LiveFlowRecord with<br/>prediction, confidence, severity, attack_type
+        LCS->>CSV: write master + cleaned CSV
     end
     
     UI->>LCS: get_recent_flows(limit)
@@ -765,25 +761,13 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph NativeMode["Native Capture Pipeline"]
-        direction TB
-        NS["PacketSniffer\n(scapy.sniff)\non_packet callback"]
-        FA["FlowAssembler\n- add_packet()\n- canonical 5-tuple key\n- idle_timeout eviction\n- pop_idle_flows()"]
-        FFC["FlowFeatureCalculator\n- compute(flow) -> FlowFeatures\n- 70 CICIDS2017 features\n- forward/backward split"]
-        NDS["DetectionService.run()"]
-        
-        NS -->|"every packet"| FA
-        FA -->|"every 2s flush"| FFC
-        FFC --> NDS
-    end
-
-    subgraph CICMode["CICFlowMeter Capture Pipeline"]
+    subgraph LiveMode["CICFlowMeter Live Capture Pipeline (sole backend)"]
         direction TB
         AS["scapy.AsyncSniffer\n_on_packet()"]
         CFS["cicflowmeter.FlowSession\n- process(pkt)\n- EXPIRED_UPDATE = 10s\n- garbage_collect(time.time())"]
         QW["_QueueWriter\n(completed_flows deque)"]
-        FL["_flush_completed_flows()\n(every 10s)"]
-        CAS["CsvAnalysisService.analyze()\n(reads cleaned CSV,\n runs full ML pipeline)"]
+        FL["_flush_completed_flows()\n(every 2s)"]
+        CAS["CsvAnalysisService.analyze()\n(reads cleaned_flows_batch.csv,\n runs ML on the current batch only)"]
         WB["Write ML results back\nprediction, confidence,\nattack_type columns"]
         
         AS -->|"every packet"| CFS
@@ -796,13 +780,10 @@ flowchart TD
     subgraph PCAP["PCAP File Analysis"]
         direction TB
         IFE2["IFlowExtractor.extract_from_pcap(path)"]
-        NFE["NativeFlowExtractor\n-> FlowFeatureCalculator\n-> 70 features"]
-        CICAD["CICFlowMeterAdapter\n-> cicflowmeter.FlowSession\n-> DataFrame\n-> FeatureMapper\n-> 70 features"]
+        CICAD["CICFlowMeterAdapter\n-> cicflowmeter.FlowSession\n-> in-memory collector\n-> FlowFeatures (70 features)"]
         PAS2["PcapAnalysisService.analyze()"]
         
-        IFE2 --> NFE
         IFE2 --> CICAD
-        NFE --> PAS2
         CICAD --> PAS2
     end
 ```
@@ -854,19 +835,14 @@ AI_IDS_3/
 │   ├── model_adapter.py            # SklearnCompatibleModelAdapter
 │   ├── xgboost_booster_adapter.py  # XGBoostBoosterAdapter
 │   ├── feature_mapper.py           # Semantic feature alignment engine
-│   ├── feature_schema.py           # Dynamic schema resolution (sidecar-first)
-│   └── cicflowmeter_adapter.py     # CICFlowMeter PCAP adapter
+│   └── feature_schema.py           # Dynamic schema resolution (sidecar-first)
 │
 ├── capture/
-│   ├── packet_sniffer.py           # scapy-based packet sniffer
-│   ├── flow.py                     # Flow data structure
-│   ├── flow_assembler.py           # 5-tuple flow grouping + idle eviction
-│   ├── flow_feature_calculator.py  # 70-feature CICIDS2017 calculator
-│   ├── live_capture_service.py     # Native capture pipeline (singleton)
-│   ├── cicflowmeter_live_capture_service.py  # CICFlowMeter capture pipeline
-│   ├── native_pcap_extractor.py    # PCAP extractor (native)
-│   ├── cicflowmeter_adapter.py     # PCAP extractor (CICFlowMeter)
-│   └── extractor_factory.py        # Extractor factory (env-based selection)
+│   ├── flow_models.py              # Shared FlowFeatures + flow_protocol_name
+│   ├── live_capture_service.py     # Live capture singleton factory (CICFlowMeter)
+│   ├── cicflowmeter_live_capture_service.py  # CICFlowMeter live capture pipeline
+│   ├── cicflowmeter_adapter.py     # PCAP extractor (CICFlowMeter, sole engine)
+│   └── extractor_factory.py        # Extractor factory (always CICFlowMeterAdapter)
 │
 ├── repositories/
 │   ├── user_repository.py

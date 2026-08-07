@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Final, Dict, Any
 
-from capture.flow_feature_calculator import FlowFeatures
+from capture.flow_models import FlowFeatures
 from core.exceptions import ConfigurationError
 from infrastructure.logging.logger_factory import get_logger
 from ml.interfaces import IFlowExtractor
@@ -31,6 +31,16 @@ def _to_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+class _CollectingWriter:
+    """In-memory OutputWriter that captures flow dicts into a list."""
+
+    def __init__(self, records: List[Dict[str, Any]]) -> None:
+        self._records = records
+
+    def write(self, data: Dict[str, Any]) -> None:
+        self._records.append(dict(data))
 
 
 class CICFlowMeterAdapter(IFlowExtractor):
@@ -62,38 +72,46 @@ class CICFlowMeterAdapter(IFlowExtractor):
         start_time: float = time.perf_counter()
 
         try:
-            from scapy.all import rdpcap, IP
-            from cicflowmeter.flow_session import FlowSession
+            import cicflowmeter.flow_session as _fs_mod
+            from scapy.all import rdpcap
         except ImportError as exc:
             raise ConfigurationError(
                 "Required dependencies missing: 'scapy' and 'cicflowmeter' packages are required. "
                 "Run: pip install scapy cicflowmeter"
             ) from exc
 
+        records: List[Dict[str, Any]] = []
+        orig_factory: Any = _fs_mod.output_writer_factory
+
+        def _collecting_factory(output_mode: Any, output: Any) -> _CollectingWriter:
+            return _CollectingWriter(records)
+
+        _fs_mod.output_writer_factory = _collecting_factory
         try:
-            session = FlowSession(output_mode=None, output=None)
+            session = _fs_mod.FlowSession(output_mode="csv", output="in-memory")
 
             packets = rdpcap(pcap_path)
             for pkt in packets:
                 session.process(pkt)
 
             session.flush_flows()
-            flows = list(session.get_flows())
+            flows = list(records)
         except ConfigurationError:
             raise
         except Exception as exc:
             raise ConfigurationError(
                 f"CICFlowMeter extraction failed for '{pcap_path}': {exc}"
             ) from exc
+        finally:
+            _fs_mod.output_writer_factory = orig_factory
 
         if not flows:
             logger.warning("No network flows extracted from: %s", pcap_path)
             return []
 
         results: List[FlowFeatures] = []
-        for flow in flows:
+        for data in flows:
             try:
-                data = flow.get_data()
                 features = self._build_features(data)
                 results.append(FlowFeatures(
                     src_ip=str(data.get("src_ip", "")).strip(),
@@ -118,8 +136,12 @@ class CICFlowMeterAdapter(IFlowExtractor):
         """
         Convert raw CICFlowMeter flow data dict to a clean feature dict
         with CICIDS2017-compatible column names.
+
+        Ports (src/dst) are retained as model features because CICIDS2017
+        trains on ``Destination Port``; only identity metadata that has no
+        learned signal is dropped.
         """
-        metadata_keys = {"src_ip", "dst_ip", "src_port", "dst_port", "protocol", "timestamp"}
+        metadata_keys = {"src_ip", "dst_ip", "protocol", "timestamp"}
         features: Dict[str, float] = {}
         for key, value in data.items():
             if key in metadata_keys:

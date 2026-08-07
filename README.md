@@ -6,13 +6,14 @@ An enterprise-grade, high-performance network intrusion detection system driven 
 
 ---
 
-## 💡 Native Architecture vs. CICFlowMeter Dependency
+## 💡 Flow Extraction: CICFlowMeter (Sole Backend)
 
-The system operates **completely independently of external CICFlowMeter binaries by default**.
-
-It features a custom, high-frequency Python flow processing engine (`capture/native_flow_extractor.py` + `flow_assembler.py` + `flow_feature_calculator.py`) that captures raw network packets directly via `scapy` and extracts matching statistical micro-flows (e.g., *Flow Duration, IAT Mean/Std, Flag Counts*). This native engine processes both live interface sniffing and historical PCAP forensics without requiring an external Java runtime environment.
-
-For environments where the legacy Java-based CICFlowMeter is mandatory, a decoupled integration adapter (`capture/cicflowmeter_adapter.py`) is provided. It can be dynamically toggled via an environment variable (`AI_IDS_FLOW_EXTRACTOR=cicflowmeter`) without modifying the underlying application codebase.
+Network flow extraction uses the **pure-Python `cicflowmeter` package** as the single
+backend for both live interface capture and historical PCAP forensics
+(`capture/cicflowmeter_live_capture_service.py` + `capture/cicflowmeter_adapter.py`).
+No external Java runtime and no alternative extraction engine exist: the historical
+native aggregation pipeline has been removed. Extracted flows are passed to the ML
+pipeline, where the deployed models are the sole classifier on every ingest channel.
 
 ---
 

@@ -181,3 +181,41 @@ class ModelService:
                 self._label_encoder_cache = None
 
         return self._label_encoder_cache
+
+    def get_model_classes(self, model_id: int) -> list[str] | None:
+        """
+        Resolves the ordered class-name list for a specific registered model.
+
+        A model's own class vocabulary is read from its sidecar metadata
+        (``<artifact>.joblib.meta.json`` -> ``classes``) when present, otherwise it falls
+        back to the global ``label_encoder.joblib`` vocabulary.  This enables models with
+        their own label space (e.g. the multi-class macro model trained on aggregate
+        features) to resolve accurate attack labels without disturbing the shared encoder
+        used by the legacy per-flow models.
+
+        Args:
+            model_id: Primary database tracking key for the targeted model asset.
+
+        Returns:
+            The ordered class-name list, or ``None`` when no vocabulary can be resolved.
+        """
+        record = self._repo.get_by_id(model_id)
+        if record is None:
+            return None
+
+        try:
+            resolved = Settings.resolve_model_path(record.file_path)
+            sidecar = resolved.with_suffix(resolved.suffix + ".meta.json")
+            if sidecar.exists():
+                import json as _json
+                payload = _json.loads(sidecar.read_text(encoding="utf-8"))
+                classes = payload.get("classes")
+                if classes:
+                    return [str(c) for c in classes]
+        except Exception:  # noqa: BLE001 - best-effort; fall back to the shared encoder
+            logger.warning("Failed to read per-model classes for id=%s; falling back to global encoder.", model_id)
+
+        encoder = self.get_label_encoder(model_id)
+        if encoder is not None and hasattr(encoder, "classes_"):
+            return [str(c) for c in encoder.classes_]
+        return None
