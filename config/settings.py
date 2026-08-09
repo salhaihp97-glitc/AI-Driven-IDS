@@ -71,6 +71,10 @@ DEFAULT_ENV_VARS: Final[dict[str, str]] = {
     "AI_IDS_MACRO_FLOW_WINDOW_SECONDS": "10.0",
     "AI_IDS_MACRO_FLOW_KEY_FIELDS": "src_ip,dst_ip,dst_port,protocol",
     "AI_IDS_MACRO_FLOW_MIN_MEMBERS": "2",
+    # Database id of the model trained on macro-aggregate features (``macro_rf_v1``).
+    # When macro-flow assembly is enabled, assembled units are dispatched to this model
+    # instead of the per-flow classifier so aggregate floods reach a model that can see them.
+    "AI_IDS_MACRO_FLOW_MODEL_ID": "5",
 }
 
 # Placeholder secret used when no key has been configured yet. It is deliberately
@@ -226,6 +230,7 @@ class Settings:
     macro_flow_window_seconds: float = field(default_factory=lambda: _get_float("AI_IDS_MACRO_FLOW_WINDOW_SECONDS", _env_float("AI_IDS_MACRO_FLOW_WINDOW_SECONDS")))
     macro_flow_key_fields: str = field(default_factory=lambda: _env("AI_IDS_MACRO_FLOW_KEY_FIELDS"))
     macro_flow_min_members: int = field(default_factory=lambda: _get_int("AI_IDS_MACRO_FLOW_MIN_MEMBERS", _env_int("AI_IDS_MACRO_FLOW_MIN_MEMBERS")))
+    macro_flow_model_id: int = field(default_factory=lambda: _get_int("AI_IDS_MACRO_FLOW_MODEL_ID", _env_int("AI_IDS_MACRO_FLOW_MODEL_ID")))
 
     @staticmethod
     def resolve_model_path(path_or_filename: str) -> Path:

@@ -291,7 +291,8 @@ class Container:
 
             self._pcap_analysis_service = PcapAnalysisService(
                 detection_service=self.detection_service,
-                flow_extractor=get_flow_extractor()
+                flow_extractor=get_flow_extractor(),
+                model_service=self.model_service,
             )
         return self._pcap_analysis_service
 

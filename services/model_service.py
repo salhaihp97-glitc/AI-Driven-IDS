@@ -219,3 +219,32 @@ class ModelService:
         if encoder is not None and hasattr(encoder, "classes_"):
             return [str(c) for c in encoder.classes_]
         return None
+
+    def resolve_macro_model_id(self, configured_macro_model_id: int | None = None) -> int | None:
+        """
+        Resolves the database id of the macro-aggregate classifier.
+
+        When macro-flow assembly is enabled, assembled units must be classified by the model
+        that was actually trained on macro-aggregate features (``macro_rf_v1``) -- not by a
+        per-flow classifier. This returns:
+          1. The explicitly configured ``AI_IDS_MACRO_FLOW_MODEL_ID`` when a matching record
+             exists in the registry, then
+          2. The first registered model whose name or filename matches ``macro``, then
+          3. ``None`` when no macro model is installed (assembly degrades to per-flow only).
+
+        Args:
+            configured_macro_model_id: Preferred database id from settings, if any.
+
+        Returns:
+            The resolved macro model database id, or ``None`` when none can be found.
+        """
+        if configured_macro_model_id:
+            for record in self.list_models():
+                if record.id == configured_macro_model_id:
+                    return record.id
+
+        for record in self.list_models():
+            haystack = f"{record.name} {record.file_path}".lower()
+            if "macro" in haystack:
+                return record.id
+        return None

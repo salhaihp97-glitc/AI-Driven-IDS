@@ -24,6 +24,7 @@ from core.exceptions import ValidationError
 from infrastructure.logging.logger_factory import get_logger
 from ml.interfaces import IFlowExtractor
 from services.detection_service import DetectionResult, DetectionService
+from services.model_service import ModelService
 
 logger = get_logger("services.pcap_analysis_service")
 
@@ -48,6 +49,7 @@ class PcapAnalysisService:
         self,
         detection_service: DetectionService,
         flow_extractor: IFlowExtractor,
+        model_service: ModelService | None = None,
         macro_assembler: object | None = None,
     ) -> None:
         """
@@ -55,6 +57,7 @@ class PcapAnalysisService:
         """
         self._detection_service: Final[DetectionService] = detection_service
         self._extractor: Final[IFlowExtractor] = flow_extractor
+        self._model_service: Final[ModelService | None] = model_service
         self._settings = get_settings()
         if macro_assembler is None:
             from capture.macro_flow_assembler import MacroFlowAssembler
@@ -88,9 +91,19 @@ class PcapAnalysisService:
             )
 
         # Aggregate tiny flows into macro-flows when enabled so aggregate attack footprints
-        # (e.g. rotating-source-port SYN floods) physically reach the model.
+        # (e.g. rotating-source-port SYN floods) physically reach the model. Macro units are
+        # classified by the macro-aggregate model (``macro_rf_v1``), never by the per-flow
+        # classifier -- the whole reason floods are invisible per-flow is that per-flow models
+        # only see individual short connections.
         enabled_assembler = bool(getattr(self._assembler, "enabled", False))
         units = flow_features_list if not enabled_assembler else list(self._assembler.assemble(flow_features_list))
+
+        # Resolve the macro model id once when assembly is active.
+        macro_model_id: int | None = None
+        if enabled_assembler and self._model_service is not None:
+            macro_model_id = self._model_service.resolve_macro_model_id(getattr(self._settings, "macro_flow_model_id", None))
+            if macro_model_id is None:
+                macro_model_id = model_id
 
         logger.info(
             "Extracted %d flows in %.2fs. Assembled %d macro-flow units. Initializing model predictions...",
@@ -105,13 +118,16 @@ class PcapAnalysisService:
             if index % 100 == 0 and index > 0:
                 logger.debug("Evaluation Progress: Classified %d/%d traffic vectors...", index, len(units))
 
+            # Dispatch assembled units to the macro model; raw single flows use the caller's model.
+            dispatch_model_id = macro_model_id if enabled_assembler else model_id
+
             try:
                 # Dispatch normalized context attributes to the active verification loops.
                 # The model is the sole authority: no rule/statistical layer overrides its
                 # verdict. The macro-flow assembler only performed data engineering so the
                 # aggregate attack footprint physically reaches the model.
                 result = self._detection_service.run(
-                    model_id=model_id,
+                    model_id=dispatch_model_id,
                     raw_features=flow_features.features,
                     source_type="pcap",
                     source_ip=flow_features.src_ip,

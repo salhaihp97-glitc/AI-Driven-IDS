@@ -53,6 +53,19 @@ class _RowUnit:
     destination_ip: str
 
 
+def _benign_result() -> DetectionResult:
+    """Returns a neutral DetectionResult placeholder for rows whose macro-flows could not be scored."""
+    return DetectionResult(
+        detection=None,
+        missing_features=[],
+        alert_created=False,
+        prediction=0,
+        confidence=0.0,
+        attack_type="BENIGN",
+        attack_reason="Inference unavailable — row treated as benign",
+    )
+
+
 class CsvAnalysisService:
     """
     Application core processor driving batch tabular security audits and ML feature vector extraction.
@@ -252,14 +265,68 @@ class CsvAnalysisService:
             raise ValidationError("Data Evaluation Interrupted: The targeted CSV file structure contains no valid rows.")
 
         # Aggregate raw rows into macro-flow classification units when assembly is enabled.
+        # Macro units are classified by the macro-aggregate model (``macro_rf_v1``), never by
+        # the per-flow classifier -- the entire reason floods are invisible per-flow is that
+        # per-flow models can only see individual short connections. Each resulting verdict is
+        # then attributed back to the exact raw rows that formed the macro-flow, so downstream
+        # row-aligned consumers (live cleaned CSV) tag every member row with the aggregate attack.
         enabled_assembler = bool(getattr(self._assembler, "enabled", False))
         if enabled_assembler:
-            macro_flows = list(self._assembler.assemble([u.flow for u in units]))
-            units = [
-                _RowUnit(flow=m, source_ip=m.src_ip, destination_ip=m.dst_ip)
-                for m in macro_flows
-            ]
-            logger.info("Macro-flow assembly active: %d raw rows -> %d macro-flow units.", total_rows, len(units))
+            # The macro model is the sole authority for assembled units; resolve its database id.
+            macro_model_id = self._model_service.resolve_macro_model_id(self._settings.macro_flow_model_id)
+            if macro_model_id is None:
+                logger.warning(
+                    "Macro-flow assembly enabled but no macro model is registered; "
+                    "falling back to per-flow model %d for assembled units.",
+                    model_id,
+                )
+                macro_model_id = model_id
+
+            mapped = list(self._assembler.assemble_mapped([u.flow for u in units]))
+            logger.info(
+                "Macro-flow assembly active: %d raw rows -> %d macro-flow units (macro model id=%s).",
+                total_rows, len(mapped), macro_model_id,
+            )
+
+            # Each unique macro verdict is computed once, then re-used for every raw member row.
+            row_results: list[DetectionResult] = [None] * total_rows  # type: ignore[list-item]
+            attack_count = 0
+            for flow, member_indices in mapped:
+                member_indices_list = list(member_indices)
+                if member_indices_list:
+                    source_ip = units[member_indices_list[0]].source_ip
+                    destination_ip = units[member_indices_list[0]].destination_ip
+                else:
+                    source_ip, destination_ip = flow.src_ip, flow.dst_ip
+                try:
+                    # Dispatch the assembled unit (pure data engineering) to the macro model.
+                    # The model is the sole authority: no rule/statistical layer overrides this.
+                    result = self._detection_service.run(
+                        model_id=macro_model_id,
+                        raw_features=flow.features,
+                        source_type=source_type,
+                        source_ip=source_ip,
+                        destination_ip=destination_ip,
+                        skip_integration=skip_integration,
+                    )
+                except Exception as e:
+                    logger.error("Skipping macro-flow unit configuration due to inference engine error: %s", e)
+                    continue
+
+                for member_row_index in member_indices_list:
+                    row_results[member_row_index] = result
+                if result.detection is not None and result.detection.prediction != 0:
+                    attack_count += 1
+
+            # Rows that failed macro inference get a benign placeholder so lengths stay aligned.
+            results = [r if r is not None else _benign_result() for r in row_results]
+
+            return CsvAnalysisSummary(
+                total_rows=total_rows,
+                attack_count=attack_count,
+                normal_count=total_rows - attack_count,
+                results=results,
+            )
 
         # Dispatch normalized vector targets directly to the active traffic pipeline.
         # The model is the sole authority: no rule/statistical layer overrides its verdict.

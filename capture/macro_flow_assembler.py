@@ -450,6 +450,40 @@ class MacroFlowAssembler:
 
     # -- main entrypoint (stateless convenience for pcap/offline) -------------
 
+    def assemble_mapped(self, flows: Sequence[FlowFeatures]) -> List[Tuple[FlowFeatures, Sequence[int]]]:
+        """
+        Assembles a batch of member flows into macro-flows, mapping each input index to
+        the macro-flow it contributed to.
+
+        Returns a list of pairs ``(macro_flow, member_indices)``.  ``member_indices`` are
+        the positional indices (into *flows*) of every raw row folded into that macro-flow.
+        This enables downstream consumers to attribute a single macro verdict back to the
+        exact member rows that produced it (e.g. tagging each per-flow CSV row with the
+        aggregated attack detection).
+
+        When the assembler is disabled, every input flow is returned unchanged with a
+        single-element index list, preserving raw per-flow classification.
+        """
+        if not self._enabled:
+            return [(flow, [i]) for i, flow in enumerate(flows)]
+
+        grouped: Dict[Tuple[str, ...], _MacroGroup] = {}
+        members: Dict[Tuple[str, ...], List[int]] = {}
+        for index, flow in enumerate(flows):
+            key = self._derive_key(flow)
+            group = grouped.get(key)
+            if group is None:
+                group = _MacroGroup(key=key)
+                grouped[key] = group
+                members[key] = []
+            group.add_member(flow.features, timestamp=0.0)
+            members[key].append(index)
+
+        result: List[Tuple[FlowFeatures, Sequence[int]]] = []
+        for key, group in grouped.items():
+            result.append((self._finalize_group(group), members[key]))
+        return result
+
     def assemble(self, flows: Sequence[FlowFeatures]) -> List[FlowFeatures]:
         """
         Assembles a batch of member flows into macro-flows.
