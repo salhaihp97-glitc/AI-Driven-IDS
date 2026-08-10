@@ -77,6 +77,6 @@
     "PortScan",
     "SYN Flood"
   ],
-  "model_type": "random_forest",
-  "version": "2.0.0"
+  "model_type": "xgboost",
+  "version": "1.0.0"
 }
