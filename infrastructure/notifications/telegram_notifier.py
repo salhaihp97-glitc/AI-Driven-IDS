@@ -70,6 +70,19 @@ def _classify_severity(confidence: float) -> tuple[str, str]:
     return label, _SEVERITY_EMOJI.get(label, "\U0001f7e2")
 
 
+def _severity_display(severity: str | None, confidence: float) -> tuple[str, str]:
+    """Resolve the severity label/emoji pair.
+
+    An explicit caller-supplied severity (e.g. ``CRITICAL`` for a blocked source)
+    wins; otherwise the canonical confidence-band classifier is used so the
+    notification can never diverge from the stored detection severity.
+    """
+    if severity:
+        normalized = severity.upper()
+        return normalized, _SEVERITY_EMOJI.get(normalized, "\U0001f7e2")
+    return _classify_severity(confidence)
+
+
 # ---------------------------------------------------------------------------
 # Telegram Notifier
 # ---------------------------------------------------------------------------
@@ -177,6 +190,8 @@ class TelegramNotifier:
         destination_ip: Optional[str] = None,
         source_type: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
+        severity: str | None = None,
+        reason: str | None = None,
     ) -> bool:
         """Dispatch a new-threat notification asynchronously.
 
@@ -192,13 +207,17 @@ class TelegramNotifier:
             destination_ip: Target network endpoint address.
             source_type: Ingestion channel (``csv``, ``pcap``, ``live``).
             occurred_at: Timestamp of the detection event (UTC).
+            severity: Optional explicit severity label (wins over the confidence
+                band) — used for blocked-source events that are critical by policy.
+            reason: Optional human-readable context (e.g. the block reason for a
+                blacklisted source) appended to the payload.
 
         Returns:
             ``True`` when the notification was enqueued for delivery (a recipient
             exists and the dispatch was handed to a daemon thread), ``False`` when
             it was dropped (no bot token, no recipients, or circuit breaker open).
         """
-        severity_label, severity_emoji = _classify_severity(confidence)
+        severity_label, severity_emoji = _severity_display(severity, confidence)
         event_time: Final[datetime] = occurred_at or datetime.now(UTC)
         formatted_time: Final[str] = event_time.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -213,6 +232,7 @@ class TelegramNotifier:
             formatted_time=formatted_time,
             alert_id=alert_id,
             source_type=source_type,
+            reason=reason,
         )
         return self._dispatch_async(text)
 
@@ -226,6 +246,8 @@ class TelegramNotifier:
         alert_id: Optional[int] = None,
         destination_ip: Optional[str] = None,
         source_type: Optional[str] = None,
+        severity: str | None = None,
+        reason: str | None = None,
     ) -> bool:
         """Dispatch an escalation notification when occurrence count crosses a threshold.
 
@@ -236,7 +258,7 @@ class TelegramNotifier:
             ``True`` when the escalation was enqueued for delivery, ``False`` when
             it was dropped (no bot token, no recipients, or circuit breaker open).
         """
-        severity_label, severity_emoji = _classify_severity(confidence)
+        severity_label, severity_emoji = _severity_display(severity, confidence)
         formatted_time: Final[str] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         text = self._build_escalation_message(
@@ -251,6 +273,7 @@ class TelegramNotifier:
             formatted_time=formatted_time,
             alert_id=alert_id,
             source_type=source_type,
+            reason=reason,
         )
         return self._dispatch_async(text)
 
@@ -510,6 +533,7 @@ class TelegramNotifier:
         formatted_time: str,
         alert_id: Optional[int],
         source_type: Optional[str],
+        reason: str | None = None,
     ) -> str:
         """Construct the primary new-threat HTML notification body."""
         alert_id_display = f"#{alert_id}" if alert_id is not None else "pending"
@@ -534,6 +558,9 @@ class TelegramNotifier:
 
         if source_type:
             lines.append(f"\u251c <b>Source Type:</b> {self._code(source_type.upper())}")
+
+        if reason:
+            lines.append(f"\u251c <b>Reason:</b> {self._esc_html(reason)}")
 
         lines += [
             "\u2514" + "\u2500" * 30,
@@ -575,6 +602,7 @@ class TelegramNotifier:
         formatted_time: str,
         alert_id: Optional[int],
         source_type: Optional[str],
+        reason: str | None = None,
     ) -> str:
         """Construct an escalation notification for rising occurrence counts."""
         alert_id_display = f"#{alert_id}" if alert_id is not None else "pending"
@@ -600,6 +628,9 @@ class TelegramNotifier:
 
         if source_type:
             lines.append(f"\u251c <b>Source Type:</b> {self._code(source_type.upper())}")
+
+        if reason:
+            lines.append(f"\u251c <b>Reason:</b> {self._esc_html(reason)}")
 
         lines += [
             "\u2514" + "\u2500" * 30,
