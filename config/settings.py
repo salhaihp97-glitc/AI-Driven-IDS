@@ -63,6 +63,13 @@ DEFAULT_ENV_VARS: Final[dict[str, str]] = {
     "AI_IDS_CSV_ANALYSIS_CHUNK_SIZE": "10000",
     "AI_IDS_ML_DECISION_THRESHOLD": "0.5",
     "AI_IDS_ML_MIN_FEATURE_COVERAGE": "0.5",
+    # --- Auto-Block Policy & Protected Infrastructure ---
+    # Master kill-switch for automatic Windows Firewall blocking of detected attackers.
+    "AI_IDS_AUTO_BLOCK_ENABLED": "true",
+    # Comma-separated IP literals that are NEVER auto-blacklisted or alert-spammed
+    # (e.g. the local default gateway / VM host 192.168.145.1). Local interface,
+    # network and broadcast addresses are protected automatically at runtime.
+    "AI_IDS_PROTECTED_IPS": "",
     # --- Macro-Flow Assembly (pure data pipeline -> feeds the model only) ---
     # Disabled by default: the deployed per-flow CICIDS2017 models (RF V3 / XGB V2)
     # are trained on individual flow rows, so aggregation changes the feature space.
@@ -221,6 +228,12 @@ class Settings:
     # environment-driven so detection strictness is tunable without code changes.
     ml_decision_threshold: float = field(default_factory=lambda: _get_float("AI_IDS_ML_DECISION_THRESHOLD", _env_float("AI_IDS_ML_DECISION_THRESHOLD")))
     ml_min_feature_coverage: float = field(default_factory=lambda: _get_float("AI_IDS_ML_MIN_FEATURE_COVERAGE", _env_float("AI_IDS_ML_MIN_FEATURE_COVERAGE")))
+
+    # --- Auto-Block Policy & Protected Infrastructure ---
+    auto_block_enabled: bool = field(default_factory=lambda: _get_bool("AI_IDS_AUTO_BLOCK_ENABLED", _env_bool("AI_IDS_AUTO_BLOCK_ENABLED")))
+    protected_ips: tuple[str, ...] = field(
+        default_factory=lambda: tuple(p.strip() for p in _env("AI_IDS_PROTECTED_IPS").split(",") if p.strip())
+    )
 
     # --- Macro-Flow Assembly (pure data pipeline, feeds the model only) ---
     # Combines many small flows sharing a five-ish-tuple key over a time window into a

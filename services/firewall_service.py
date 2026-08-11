@@ -10,9 +10,15 @@ repositories and the AlertEngine. Provides high-level operations for:
 
 from __future__ import annotations
 
+import ipaddress
+import re
+import socket
+import subprocess
+from functools import lru_cache
 from typing import Final
 
 from config.constants import LogLevel, LogSource
+from config.settings import get_settings
 from core.entities.log_entry import LogEntry
 from core.exceptions import ValidationError
 from infrastructure.firewall.windows_firewall import WindowsFirewallManager
@@ -23,6 +29,108 @@ from repositories.whitelist_repository import WhitelistRepository
 from utils.validators import validate_ip_address
 
 logger = get_logger("services.firewall_service")
+
+
+@lru_cache(maxsize=1)
+def _discover_local_ipv4() -> frozenset[str]:
+    """
+    Enumerates every IPv4 literal bound to a local interface.
+
+    Cached for the process lifetime because interface bindings are effectively
+    static while the IDS runs. Used by :func:`is_protected_ip` so infrastructure
+    addresses (the capture host itself, its gateway and subnets) are never
+    auto-blocked.
+    """
+    discovered: set[str] = set()
+    try:
+        import psutil
+        for _, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    discovered.add(addr.address)
+    except Exception:  # noqa: BLE001 - best-effort discovery must never crash the pipeline
+        logger.warning("Local IPv4 discovery failed; auto-block protection uses configured list only.")
+    return frozenset(discovered)
+
+
+def _is_ipv4(literal: str) -> bool:
+    """Returns ``True`` when *literal* is a valid IPv4 address string."""
+    try:
+        return ipaddress.ip_address(literal).version == 4
+    except ValueError:
+        return False
+
+
+@lru_cache(maxsize=1)
+def _discover_default_gateways() -> frozenset[str]:
+    """
+    Resolves default gateway IP literals via platform route inspection.
+
+    Best-effort: on failure an empty set is returned and protection falls back to
+    the configured ``AI_IDS_PROTECTED_IPS`` plus local subnet/broadcast literals.
+    """
+    gateways: set[str] = set()
+    try:
+        if __import__("sys").platform.startswith("win"):
+            out = subprocess.run(
+                ["route", "print", "0.0.0.0", "mask", "0.0.0.0"],
+                capture_output=True, text=True, timeout=5, check=False,
+            ).stdout
+            for line in out.splitlines():
+                if "0.0.0.0" in line:
+                    match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", line)
+                    if match and line.strip().startswith("0.0.0.0"):
+                        gateways.add(match.group(1))
+        else:
+            out = subprocess.run(
+                ["ip", "route"], capture_output=True, text=True, timeout=5, check=False,
+            ).stdout
+            for line in out.splitlines():
+                if line.startswith("default"):
+                    match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", line)
+                    if match:
+                        gateways.add(match.group(1))
+    except Exception:  # noqa: BLE001 - best-effort discovery must never crash the pipeline
+        logger.debug("Default gateway discovery failed; using configured protected IPs only.")
+    return frozenset(gateways)
+
+
+@lru_cache(maxsize=1)
+def _discover_subnet_boundaries() -> frozenset[str]:
+    """
+    Resolves the network + broadcast literal of every local IPv4 subnet.
+
+    Cached like the other discovery helpers — subnet geometry is effectively
+    static for the process lifetime.
+    """
+    boundaries: set[str] = set()
+    try:
+        import psutil
+        for _, iface_addrs in psutil.net_if_addrs().items():
+            for addr in iface_addrs:
+                if addr.family == socket.AF_INET and addr.netmask:
+                    try:
+                        net = ipaddress.ip_network(f"{addr.address}/{addr.netmask}", strict=False)
+                        boundaries.add(str(net.network_address))
+                        boundaries.add(str(net.broadcast_address))
+                    except ValueError:
+                        continue
+    except Exception:  # noqa: BLE001 - best-effort discovery must never crash the pipeline
+        pass
+    return frozenset(boundaries)
+
+
+@lru_cache(maxsize=1)
+def _protected_addresses() -> frozenset[ipaddress.IPv4Address]:
+    """
+    Merges every protected IPv4 literal (configured + discovered) into one
+    cached set so per-flow protection checks are O(1) after first resolution.
+    """
+    protected: set[str] = set(get_settings().protected_ips)
+    protected.update(_discover_local_ipv4())
+    protected.update(_discover_default_gateways())
+    protected.update(_discover_subnet_boundaries())
+    return frozenset(ipaddress.ip_address(p) for p in protected if _is_ipv4(p))
 
 
 class FirewallService:
@@ -65,17 +173,43 @@ class FirewallService:
 
     # ── Auto-Block on Detection ─────────────────────────────────────────
 
+    def is_protected_ip(self, ip_address: str) -> bool:
+        """
+        Determines whether a target IP must never be auto-blocked.
+
+        Protection covers, in priority order:
+          1. IPs explicitly configured via ``AI_IDS_PROTECTED_IPS``.
+          2. Local interface IPv4 literals (the capture host itself).
+          3. Default gateways discovered from the OS routing table.
+          4. The network and broadcast address of every local IPv4 subnet.
+
+        A whitelisted IP is always returned as protected by the caller before
+        this method is consulted; the two lists are intentionally disjoint.
+        """
+        if not ip_address:
+            return False
+        try:
+            ip = ipaddress.ip_address(ip_address)
+        except ValueError:
+            return False
+        return ip in _protected_addresses()
+
     def auto_block_on_threat(self, ip_address: str, reason: str = "") -> bool:
         """
         Called by AlertEngine when a threat is confirmed.
 
-        - If IP is whitelisted → skip (admin trust override)
+        - If auto-blocking is globally disabled → no-op.
+        - If IP is whitelisted or a protected infrastructure address → skip.
         - If IP is already blacklisted → add firewall block rule
         - Otherwise → add to blacklist + firewall block rule
 
         Returns True only if firewall rule was actually created.
         """
         if not ip_address or ip_address == "unknown":
+            return False
+
+        if not get_settings().auto_block_enabled:
+            logger.info("Auto-block DISABLED by configuration — skipping block for %s.", ip_address)
             return False
 
         # Only valid IP literals may reach the persistence layer or netsh.
@@ -89,6 +223,13 @@ class FirewallService:
         if self._whitelist.exists(ip_address):
             logger.info(
                 "Auto-block SKIPPED for %s — IP is whitelisted (admin trust).", ip_address
+            )
+            return False
+
+        # Respect protected infrastructure — never blacklist the gateway/host/subnets
+        if self.is_protected_ip(ip_address):
+            logger.info(
+                "Auto-block SKIPPED for %s — protected infrastructure address.", ip_address
             )
             return False
 
