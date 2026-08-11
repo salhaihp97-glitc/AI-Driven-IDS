@@ -93,6 +93,13 @@ class BlacklistRepository(BaseSQLiteRepository[BlacklistIP]):
             cur.execute("SELECT 1 FROM blacklist_ips WHERE ip_address = ?", (ip_address,))
             return cur.fetchone() is not None
 
+    def get_by_ip(self, ip_address: str) -> BlacklistIP | None:
+        """Returns the persistent blacklist record (with its block reason) for an IP, or None."""
+        with self._db.cursor() as cur:
+            cur.execute("SELECT * FROM blacklist_ips WHERE ip_address = ?", (ip_address,))
+            row = cur.fetchone()
+        return self._row_to_entity(row) if row is not None else None
+
     def count(self) -> int:
         """Returns the total number of blacklisted IP entries."""
         with self._db.cursor() as cur:
