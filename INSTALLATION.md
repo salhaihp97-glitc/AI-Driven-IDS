@@ -137,7 +137,7 @@ python -m pytest
 يمكن أيضًا التحقق من الأساسيات دون تشغيل الواجهة:
 
 ```bash
-python scripts/verify_foundation.py
+python -m pytest tests/test_services_layer.py -q
 ```
 
 ---
