@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
@@ -27,6 +27,9 @@ from repositories.log_repository import LogRepository
 from services.alert_engine import AlertEngine
 from services.ip_list_service import IpListService
 from services.model_service import ModelService
+
+if TYPE_CHECKING:
+    from services.firewall_service import FirewallService
 
 logger = get_logger("services.detection_service")
 BENIGN_CLASS_INDEX: Final[int] = 0
@@ -62,6 +65,7 @@ class DetectionService:
         ip_list_service: IpListService | None = None,
         feature_mapper: FeatureMapper | None = None,
         settings: Settings | None = None,
+        firewall_service: FirewallService | None = None,
     ) -> None:
         """
         Initializes the service with core application boundaries using strict dependency injection patterns.
@@ -73,6 +77,7 @@ class DetectionService:
         self._ip_lists: Final[IpListService | None] = ip_list_service
         self._mapper: Final[FeatureMapper] = feature_mapper or FeatureMapper()
         self._settings: Final[Settings] = settings or get_settings()
+        self._firewall: Final[FirewallService | None] = firewall_service
 
     def run(
         self,
@@ -153,10 +158,16 @@ class DetectionService:
             model_name = self._resolve_model_name(model_id)
             feature_analysis = self._build_feature_analysis(raw_features, required_features, adapter, prediction, feature_vector)
 
-            # 5. Override for IP lists (only when integration is active)
+            # 5. Override for IP lists (only when integration is active).
+            # Protected infrastructure (gateway/host/subnets) is never treated as
+            # an attacker even if a legacy blacklist entry exists — the source is
+            # infrastructure, so the verdict stays the model's decision.
+            is_protected_infra = bool(
+                self._firewall is not None and source_ip and self._firewall.is_protected_ip(source_ip)
+            )
             attack_reason = ""
             severity = Detection.classify_severity(confidence, prediction != BENIGN_CLASS_INDEX)
-            if is_blacklisted:
+            if is_blacklisted and not is_protected_infra:
                 prediction = 1
                 confidence = 1.0
                 attack_type = "Blocked IP Attempting Access"
@@ -213,7 +224,15 @@ class DetectionService:
             # 6. Evaluate alert conditions (skipped for file analysis)
             alert_entity = None
             if not skip_integration:
-                alert_entity = self._alerts.process_detection(persisted_detection, model_name=model_name)
+                # Pass the model-derived class label (e.g. "SYN Flood", "PortScan",
+                # "DoS Hulk") so the alert/Telegram payload carries the ACTUAL attack
+                # name, not the generic default. The engine still upgrades this to
+                # "Blocked IP Attempting Access" for blacklisted sources.
+                alert_entity = self._alerts.process_detection(
+                    persisted_detection,
+                    model_name=model_name,
+                    threat_type=attack_type or "Anomalous / Malicious Traffic",
+                )
 
             return DetectionResult(
                 detection=persisted_detection, 

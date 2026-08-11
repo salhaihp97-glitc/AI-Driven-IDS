@@ -257,6 +257,7 @@ class Container:
                 alert_engine=self.alert_engine,
                 ip_list_service=self.ip_list_service,
                 settings=get_settings(),
+                firewall_service=self.firewall_service,
             )
         return self._detection_service
 

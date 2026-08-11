@@ -89,6 +89,15 @@ class AlertEngine:
                 )
             return None
 
+        # ── Protected infrastructure (gateway/host/subnets): never alert-spam ──
+        if self._firewall is not None and detection.source_ip and self._firewall.is_protected_ip(detection.source_ip):
+            if detection.prediction != 0:
+                logger.info(
+                    "Protected infrastructure IP %s traffic classified as %s — alert suppressed (not an attacker).",
+                    source_ip, detection.attack_type,
+                )
+            return None
+
         # ── Blacklist handling: force alert regardless of model prediction ──
         is_blacklisted = detection.is_blacklisted or (detection.source_ip and self._ip_lists.is_blacklisted(detection.source_ip))
         if is_blacklisted:
