@@ -158,28 +158,47 @@ class DetectionService:
             model_name = self._resolve_model_name(model_id)
             feature_analysis = self._build_feature_analysis(raw_features, required_features, adapter, prediction, feature_vector)
 
-            # 5. Override for IP lists (only when integration is active).
-            # Protected infrastructure (gateway/host/subnets) is never treated as
-            # an attacker even if a legacy blacklist entry exists — the source is
-            # infrastructure, so the verdict stays the model's decision.
+            # 5. Reputation context (only when integration is active). The ML model
+            # remains the sole classifier — whitelist/blacklist membership NEVER
+            # replaces the model verdict, it only annotates the record so operators
+            # see why a flow was treated as trusted or as a blocked source. Protected
+            # infrastructure (gateway/host/subnets) is never treated as an attacker
+            # even if a legacy blacklist entry exists.
             is_protected_infra = bool(
                 self._firewall is not None and source_ip and self._firewall.is_protected_ip(source_ip)
             )
+
+            block_reason: str | None = None
+            if not skip_integration and is_blacklisted and self._ip_lists is not None:
+                entry = self._ip_lists.get_blacklist_entry(source_ip or "")
+                block_reason = (entry.reason if entry is not None else None) or None
+
             attack_reason = ""
             severity = Detection.classify_severity(confidence, prediction != BENIGN_CLASS_INDEX)
             if is_blacklisted and not is_protected_infra:
-                prediction = 1
-                confidence = 1.0
-                attack_type = "Blocked IP Attempting Access"
-                attack_reason = f"Blacklisted IP {source_ip} attempting to access the network — immediate block applied"
+                # Known attacker present: keep the model's classification, confirm the
+                # block and carry the block reason so the inform is complete.
+                if prediction != BENIGN_CLASS_INDEX:
+                    attack_reason = (
+                        f"Blacklisted source {source_ip} BLOCKED (reason: {block_reason or 'listed in blacklist'}). "
+                        f"Model classified traffic as {attack_type} with {confidence:.1%} confidence — {feature_analysis}"
+                    )
+                else:
+                    attack_reason = (
+                        f"Blacklisted source {source_ip} BLOCKED (reason: {block_reason or 'listed in blacklist'}). "
+                        f"Model classified traffic as benign."
+                    )
                 severity = "CRITICAL"
             elif is_whitelisted:
+                # Whitelisted: full detection still runs and the model verdict is kept;
+                # only the alert is suppressed downstream. The record notes the trust.
                 if prediction != BENIGN_CLASS_INDEX:
-                    attack_type = "Admin Test Traffic"
-                    attack_reason = f"Whitelisted admin test traffic from {source_ip} — model would classify as anomalous but trusted"
+                    attack_reason = (
+                        f"Whitelisted admin test traffic from {source_ip} — model classified as {attack_type} "
+                        f"with {confidence:.1%} confidence but trusted."
+                    )
                 else:
-                    severity = ""
-                    attack_reason = f"Whitelisted admin test traffic from {source_ip} — classified as benign"
+                    attack_reason = f"Whitelisted admin test traffic from {source_ip} — model classified as benign."
             else:
                 if prediction != BENIGN_CLASS_INDEX:
                     attack_reason = (
@@ -231,7 +250,7 @@ class DetectionService:
                 alert_entity = self._alerts.process_detection(
                     persisted_detection,
                     model_name=model_name,
-                    threat_type=attack_type or "Anomalous / Malicious Traffic",
+                    threat_type=(attack_type if prediction != BENIGN_CLASS_INDEX and attack_type else "Anomalous / Malicious Traffic"),
                 )
 
             return DetectionResult(
