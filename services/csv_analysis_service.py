@@ -102,6 +102,7 @@ class CsvAnalysisService:
         max_rows: int | None = None,
         source_type: str = "csv",
         skip_integration: bool = True,
+        dataframe: pd.DataFrame | None = None,
     ) -> CsvAnalysisSummary:
         """
         Parses a target text dataset to detect anomalies and evaluate network threat counts.
@@ -126,6 +127,10 @@ class CsvAnalysisService:
             skip_integration: When False, alerts and IP whitelist/blacklist enforcement are
                 active for these flows (used by live capture). File analysis keeps the default
                 ``True`` so verdicts stay pure ML outputs.
+            dataframe: Optional pre-loaded ``pandas.DataFrame``. When supplied the audit runs
+                entirely in memory — no temporary CSV round-trip — which removes two disk I/O
+                passes per live-capture flush (the primary latency driver under heavy flow
+                loads). ``csv_path`` is ignored for row ingestion when this is provided.
 
         Returns:
             A populated CsvAnalysisSummary compiling classification vectors and metrics.
@@ -133,13 +138,17 @@ class CsvAnalysisService:
         Raises:
             ValidationError: If the file is unreadable, corrupted, or completely empty.
         """
-        try:
-            header = pd.read_csv(csv_path, nrows=0)
-        except Exception as exc:
-            raise ValidationError(f"Data File Access Fault: Unable to ingest target CSV log structure: {exc}") from exc
+        if dataframe is None:
+            try:
+                header = pd.read_csv(csv_path, nrows=0)
+            except Exception as exc:
+                raise ValidationError(f"Data File Access Fault: Unable to ingest target CSV log structure: {exc}") from exc
+            columns: Final[list[str]] = [str(col).strip() for col in header.columns]
+        else:
+            if dataframe is None or dataframe.empty:
+                raise ValidationError("Data Evaluation Interrupted: The supplied dataframe contains no valid rows.")
+            columns = [str(col).strip() for col in dataframe.columns]
 
-        # Sanitize metadata boundaries by stripping trailing whitespace from column mappings
-        columns: Final[list[str]] = [str(col).strip() for col in header.columns]
         if not columns:
             raise ValidationError("Data Evaluation Interrupted: The targeted CSV file structure contains no valid rows.")
 
@@ -208,58 +217,67 @@ class CsvAnalysisService:
 
         units: list[_RowUnit] = []
         truncated: bool = False
-        try:
-            for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
-                chunk.columns = [str(col).strip() for col in chunk.columns]
-                for _, row in chunk.iterrows():
-                    if effective_cap is not None and total_rows >= effective_cap:
-                        truncated = True
-                        break
 
-                    total_rows += 1
-                    if total_rows % 100 == 0:
-                        logger.debug("Auditing batch index row %d... (Duration: %.2fs)", total_rows, time.time() - start_time)
-
-                    try:
-                        raw_features: Final[dict[str, float]] = {
-                            col: float(row[col])
-                            for col in chunk.columns
-                            if pd.notnull(row[col])
-                            and col not in (ip_col, dst_col)
-                            and col.lower() not in {"label", "label ", "timestamp", "flow id",
-                                                     "prediction", "confidence", "severity"}
-                            and isinstance(row[col], (int, float, np.integer, np.floating))
-                        }
-
-                        source_ip = str(row[ip_col]).strip() if (ip_col and pd.notnull(row[ip_col])) else "Unknown"
-                        destination_ip = str(row[dst_col]).strip() if (dst_col and pd.notnull(row[dst_col])) else "Unknown"
-
-                        def _row_int(col_name: Optional[str]) -> int:
-                            if col_name is None:
-                                return 0
-                            value = row.get(col_name)
-                            try:
-                                return int(float(value)) if pd.notnull(value) else 0
-                            except (TypeError, ValueError):
-                                return 0
-
-                        flow = FlowFeatures(
-                            src_ip=source_ip,
-                            dst_ip=destination_ip,
-                            src_port=_row_int(src_port_col),
-                            dst_port=_row_int(dst_port_col),
-                            protocol=_row_int(protocol_col),
-                            features=raw_features,
-                        )
-                        units.append(_RowUnit(flow=flow, source_ip=source_ip, destination_ip=destination_ip))
-
-                    except Exception as e:
-                        logger.error("Skipping structural row vector configuration due to ingestion error: %s", e)
-
-                if truncated:
+        def _ingest_rows(row_iter) -> None:
+            """Shared per-row ingestion used by both the file and in-memory paths."""
+            nonlocal total_rows, truncated
+            for _, row in row_iter:
+                if effective_cap is not None and total_rows >= effective_cap:
+                    truncated = True
                     break
-        except Exception as exc:
-            raise ValidationError(f"Data Evaluation Interrupted: Failed while auditing CSV stream: {exc}") from exc
+
+                total_rows += 1
+                if total_rows % 100 == 0:
+                    logger.debug("Auditing batch index row %d... (Duration: %.2fs)", total_rows, time.time() - start_time)
+
+                try:
+                    raw_features: Final[dict[str, float]] = {
+                        col: float(row[col])
+                        for col in columns
+                        if pd.notnull(row[col])
+                        and col not in (ip_col, dst_col)
+                        and col.lower() not in {"label", "label ", "timestamp", "flow id",
+                                                 "prediction", "confidence", "severity"}
+                        and isinstance(row[col], (int, float, np.integer, np.floating))
+                    }
+
+                    source_ip = str(row[ip_col]).strip() if (ip_col and pd.notnull(row[ip_col])) else "Unknown"
+                    destination_ip = str(row[dst_col]).strip() if (dst_col and pd.notnull(row[dst_col])) else "Unknown"
+
+                    def _row_int(col_name: Optional[str]) -> int:
+                        if col_name is None:
+                            return 0
+                        value = row.get(col_name)
+                        try:
+                            return int(float(value)) if pd.notnull(value) else 0
+                        except (TypeError, ValueError):
+                            return 0
+
+                    flow = FlowFeatures(
+                        src_ip=source_ip,
+                        dst_ip=destination_ip,
+                        src_port=_row_int(src_port_col),
+                        dst_port=_row_int(dst_port_col),
+                        protocol=_row_int(protocol_col),
+                        features=raw_features,
+                    )
+                    units.append(_RowUnit(flow=flow, source_ip=source_ip, destination_ip=destination_ip))
+
+                except Exception as e:
+                    logger.error("Skipping structural row vector configuration due to ingestion error: %s", e)
+
+        if dataframe is not None:
+            # In-memory fast path (live capture): single pass, no temp CSV on disk.
+            _ingest_rows(dataframe.iterrows())
+        else:
+            try:
+                for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+                    chunk.columns = [str(col).strip() for col in chunk.columns]
+                    _ingest_rows(chunk.iterrows())
+                    if truncated:
+                        break
+            except Exception as exc:
+                raise ValidationError(f"Data Evaluation Interrupted: Failed while auditing CSV stream: {exc}") from exc
 
         if total_rows == 0:
             raise ValidationError("Data Evaluation Interrupted: The targeted CSV file structure contains no valid rows.")
