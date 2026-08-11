@@ -137,6 +137,7 @@ capture/interface_lister.py               # Network interface enumeration
 capture/live_capture_service.py           # Live capture singleton factory (CICFlowMeter)
 capture/cicflowmeter_adapter.py           # Pure-Python CICFlowMeter PCAP extraction
 capture/cicflowmeter_live_capture_service.py
+capture/macro_flow_assembler.py           # REQUIRED for SYN-flood/port-scan detection
 
 
 # ============================================================================
@@ -179,6 +180,15 @@ models/random_forest_v3.joblib            # Random Forest model (23 MB)
 models/random_forest_v3.joblib.meta.json  # RF model metadata
 models/xgboost_pipeline_v2.joblib         # XGBoost model (1.1 MB)
 models/xgboost_pipeline_v2.joblib.meta.json  # XGBoost model metadata
+models/macro_rf_v1.joblib                 # Macro-aggregate model V1 (4 classes) — detects SYN flood/scan (206 KB)
+models/macro_rf_v1.joblib.meta.json       # Macro model metadata
+models/macro_xgb_v1.joblib                # Macro-aggregate XGBoost model V1 (4 classes)
+models/macro_xgb_v1.joblib.meta.json      # Macro XGBoost model metadata
+models/macro_rf_v2.joblib                 # Macro-aggregate model V2 (7 classes) — adds DoS Hulk / Slowhttptest / SSH-Patator
+models/macro_rf_v2.joblib.meta.json       # Macro RF V2 metadata
+models/macro_xgb_v2.joblib                # Macro-aggregate XGBoost model V2 (7 classes) — recommended (id=8)
+models/macro_xgb_v2.joblib.meta.json      # Macro XGB V2 metadata
+models/macro_models_evaluation.json       # Macro RF vs XGB evaluation record (optional)
 
 
 # ============================================================================
@@ -278,6 +288,18 @@ data/ai_ids.db-wal                        # SQLite WAL journal
 #      mkdir logs
 #      mkdir data
 #      mkdir models
+# 5b. PROVISION MODELS + MACRO DETECTION (CRITICAL — do not skip):
+#      Register all model artifacts (incl. macro v1 AND v2) and enable macro
+#      assembly:
+#          python scripts/setup_deployment.py
+#      This registers RF V3, XGBoost V2, Macro RF V1/XGB V1 AND Macro RF V2/XGB V2,
+#      activates the recommended macro model (XGB V2 id=8), and flips
+#      AI_IDS_MACRO_FLOW_ENABLED=true in .env.
+#      AI_IDS_MACRO_FLOW_MODEL_ID selects WHICH macro learner is used at runtime
+#      (7 = Macro RF V2, 8 = Macro XGB V2). V2 models cover 7 classes — BENIGN, DDoS,
+#      PortScan, SYN Flood, DoS Hulk, DoS Slowhttptest, SSH-Patator — so every one of
+#      the 5 Kali attacks (nmap, hping3 SYN flood, hulk, slowhttptest, hydra) gets its
+#      own label. V2 hold-out: RF 0.9964/0.9958 MCC, XGB 0.9988/0.9986 MCC.
 # 6. Run the application:
 #      streamlit run app.py        (Web UI)
 #      python cli.py               (CLI interactive menu)
@@ -286,5 +308,26 @@ data/ai_ids.db-wal                        # SQLite WAL journal
 #   Username: admin
 #   Password: admin
 #
+# ============================================================================
+# CRITICAL: Why SYN floods / port scans were NOT detected before
+# ============================================================================
+# The per-flow CICIDS2017 models (RF V3 / XGBoost V2) classify each flow INDIVIDUALLY.
+# A rotating-source-port SYN flood produces thousands of tiny 3-packet flows that,
+# one at a time, are statistically identical to benign short connections — so the
+# per-flow models label them BENIGN. This is by design and cannot be "fixed" in the
+# per-flow models.
+#
+# Detection of floods REQUIRES:
+#   1. capture/macro_flow_assembler.py  (present in this copy)
+#   2. models/macro_rf_v2.joblib OR macro_xgb_v2.joblib (present in this copy)
+#   3. AI_IDS_MACRO_FLOW_ENABLED=true   (setup_deployment.py sets this)
+#   4. Model id=8 "Macro XGB V2" registered + active in the DB (setup does this)
+#      (id=7 "Macro RF V2" is the RandomForest alternative — near-identical power)
+#   5. Restart the app / live capture AFTER the setup script completes.
+#
+# Verify on the target before attacking:
+#      python scripts/setup_deployment.py path/to/captured_flows_master.csv
+#   -> prints "PASS — attacks detected" if the pipeline is healthy.
+# ============================================================================
 # IMPORTANT: For live network capture features, run as Administrator/root.
 # ============================================================================
