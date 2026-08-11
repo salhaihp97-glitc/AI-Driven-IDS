@@ -293,8 +293,9 @@ class CICFlowMeterLiveCaptureService:
             self._flush_thread.join(timeout=self._settings.live_shutdown_timeout_seconds)
             self._flush_thread = None
 
-        # Final flush of any remaining flows
-        self._flush_completed_flows()
+        # Final flush of any remaining flows — persist without ML inference so
+        # shutdown is immediate (classification has already stopped with capture).
+        self._flush_completed_flows(process_ml=False)
 
         # Restore patched constants
         try:
@@ -411,7 +412,7 @@ class CICFlowMeterLiveCaptureService:
                 self._last_error = f"Flush loop iteration failed: {exc}"
                 logger.exception("Flush loop iteration failed unexpectedly.")
 
-    def _flush_completed_flows(self) -> None:
+    def _flush_completed_flows(self, process_ml: bool = True) -> None:
         """
         Actively expire idle flows from the FlowSession, drain the queue,
         write to CSV, and run ML inference.
@@ -419,6 +420,11 @@ class CICFlowMeterLiveCaptureService:
         The flush thread MUST call garbage_collect() because FlowSession.process()
         only calls it every PACKETS_PER_GC (1000) packets. Without this call,
         flows accumulate in the session dict but never reach the output queue.
+
+        Args:
+            process_ml: When False (shutdown flush) the remaining raw flows are
+                persisted to the master CSV only — no ML inference — so stopping
+                capture returns immediately instead of classifying a tail batch.
         """
         if self._flow_session is None:
             return
@@ -478,6 +484,12 @@ class CICFlowMeterLiveCaptureService:
             self._last_error = f"Failed to write raw flows to master CSV: {exc}"
             logger.exception("Failed to write raw flows to master CSV.")
 
+        if not process_ml:
+            # Shutdown flush: capture has stopped, so persist raw flows only and
+            # skip the sanitisation / ML / cleaned-CSV steps entirely.
+            logger.info("Shutdown flush persisted %d raw flows without ML inference.", len(df))
+            return
+
         # 2. Sanitise for ML pipeline
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         df[numeric_cols] = df[numeric_cols].fillna(0.0)
@@ -485,30 +497,26 @@ class CICFlowMeterLiveCaptureService:
 
         # 3. Run ML inference on the current batch ONLY (never the accumulated file),
         #    then persist the sanitised batch with ML results to the cleaned CSV.
+        #    Classification runs entirely in memory — the dataframe is handed to the
+        #    analysis pipeline directly, removing the temporary CSV round-trip that
+        #    dominated latency when many flows flushed at once.
         summary = None
-        if self._csv_analysis_service and self._model_id:
+        if process_ml and self._csv_analysis_service and self._model_id:
             try:
-                batch_csv = self._cleaned_csv_path.with_name("cleaned_flows_batch.csv")
-                df.to_csv(batch_csv, index=False)
-                try:
-                    summary = self._csv_analysis_service.analyze(
-                        model_id=self._model_id,
-                        csv_path=str(batch_csv),
-                        source_type="live",
-                        skip_integration=False,
-                    )
-                    logger.info(
-                        "ML inference complete — Evaluated: %d | Attack: %d | Normal: %d",
-                        summary.total_rows,
-                        summary.attack_count,
-                        summary.normal_count,
-                    )
-                    self._append_recent_flows(summary, df)
-                finally:
-                    try:
-                        batch_csv.unlink(missing_ok=True)
-                    except Exception:
-                        logger.debug("Failed to remove live batch CSV '%s'.", batch_csv)
+                summary = self._csv_analysis_service.analyze(
+                    model_id=self._model_id,
+                    csv_path="",  # unused when a dataframe is supplied
+                    source_type="live",
+                    skip_integration=False,
+                    dataframe=df,
+                )
+                logger.info(
+                    "ML inference complete — Evaluated: %d | Attack: %d | Normal: %d",
+                    summary.total_rows,
+                    summary.attack_count,
+                    summary.normal_count,
+                )
+                self._append_recent_flows(summary, df)
             except Exception as exc:
                 self._last_error = f"ML inference pipeline failed for live flows: {exc}"
                 logger.exception("ML inference pipeline failed for live flows.")
