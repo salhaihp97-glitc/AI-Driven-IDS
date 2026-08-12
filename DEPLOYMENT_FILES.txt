@@ -211,10 +211,11 @@ data/ai_ids.db-wal                        # SQLite WAL journal
 # SCRIPTS (Optional - development/maintenance utilities)
 # ============================================================================
 # scripts/__init__.py
-# scripts/verify_foundation.py            # Foundation layer verification
+# scripts/setup_deployment.py               # Debian provisioning + health check
 # scripts/register_model.py               # CLI model registration helper
 # scripts/availability_monitor.py          # Stability test
-# scripts/capture_uat_screenshots.py       # UAT screenshot capture
+# scripts/build_macro_model.py            # Macro model builder
+# scripts/train_macro_models.py           # Macro model training
 # scripts/security_scan.py                # Security scanning utility
 
 
@@ -229,7 +230,6 @@ data/ai_ids.db-wal                        # SQLite WAL journal
 # tests/test_repositories.py
 # tests/test_security.py
 # tests/test_services_layer.py
-# tests/rf.joblib                         # Test fixture model
 
 
 # ============================================================================
@@ -265,7 +265,6 @@ data/ai_ids.db-wal                        # SQLite WAL journal
 # uat_results.json                        # UAT results
 # load_test_results.json                  # Load test results
 # availability_results.json               # Availability test results
-# rf.joblib                               # Duplicate model at root
 # models/models_evaluation_results.json    # Evaluation results (not needed at runtime)
 # *.docx                                  # University report document
 # ============================================================================

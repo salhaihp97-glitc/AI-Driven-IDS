@@ -77,6 +77,11 @@ simulated_attacks_demo.pcap
 captured_flows_master.csv
 cleaned_flows_master.csv
 
+# --- Stray dev/test artifacts (removed from repo; keep out) ---
+/rf.joblib
+/rf_nfr.joblib
+/test.pcapng
+
 # --- Temporary directories ---
 tmp/
 tmp_pytest/

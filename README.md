@@ -67,10 +67,10 @@ The initial system bootstrap sequence automatically establishes a default admini
 
 > 🚨 **Security Notice:** The password is encrypted instantly using a secure cryptographic `bcrypt` hash inside the database. **Rotate this credential immediately** via the Settings panel after your initial login sequence.
 
-To verify the integrity of the database repositories, system constants, and dependency trees without launching the web server, run the foundation validation script:
+To verify the integrity of the database repositories, system constants, and dependency trees without launching the web server, run the test suite foundation checks:
 
 ```bash
-python scripts/verify_foundation.py
+python -m pytest tests/test_services_layer.py -q
 
 ```
 
