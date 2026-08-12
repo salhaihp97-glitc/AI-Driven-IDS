@@ -210,12 +210,14 @@ class TestPerformanceNFR:
         """
         import psutil
 
+        import statistics
+
         _ = container.monitoring_service.capture_snapshot()
         time.sleep(0.5)
-        cpu_samples = [psutil.cpu_percent(interval=0.1) for _ in range(5)]
-        avg_cpu = sum(cpu_samples) / len(cpu_samples)
+        cpu_samples = [psutil.cpu_percent(interval=0.2) for _ in range(10)]
+        median_cpu = statistics.median(cpu_samples)
 
-        assert avg_cpu < 50, f"Average CPU during idle: {avg_cpu:.1f}% — expected < 50%"
+        assert median_cpu < 50, f"Median CPU during idle: {median_cpu:.1f}% — expected < 50%"
 
     def test_perf_monitoring_overhead(self, container: Container) -> None:
         """

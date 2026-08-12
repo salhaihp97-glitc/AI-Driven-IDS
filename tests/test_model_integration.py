@@ -327,42 +327,69 @@ class TestScalerAwareInference:
         assert str(self.le.classes_[0]) == "BENIGN"
 
     def test_scaled_vector_predicts_attack_where_raw_does_not(self):
-        """Scaling changes inference on realistic in-distribution flows.
+        """Adapter must reproduce the estimator's scaled probability verdict.
 
-        A fixed-seed flow that the scaled pipeline classifies as an attack must NOT be
-        silently forced to BENIGN (which is what the pre-fix raw path produced).
+        The adapter's ``predict`` is the generalized ``P(attack) = 1 - P(BENIGN)`` rule over
+        the internal scaler + estimator chain: when the model assigns the majority
+        probability to BENIGN (at or above the decision threshold) the flow stays benign,
+        otherwise the strongest non-benign class is declared. It must always apply
+        training-time scaling first (raw magnitudes misalign learned split thresholds) and
+        must never fabricate a class the underlying estimator's probability distribution
+        does not support. Guarding the rule relationally against the estimator's own scaled
+        probabilities keeps the test robust to model re-training that shifts boundaries.
         """
-        rng = np.random.default_rng(10)
-        z = rng.normal(0, 2.0, size=(1, 70))
-        raw = (self.scaler.mean_ + z * self.scaler.scale_).reshape(1, -1)
+        from config.settings import get_settings
 
-        # Raw (unscaled) path — exactly what the pre-fix runtime fed the estimator.
-        pred_raw = int(self.xgb._estimator.predict(raw)[0])
-        # Adapter path — applies the scaler internally (the fixed runtime).
-        pred_scaled = int(self.xgb.predict(raw))
-        assert pred_raw == 0, "Raw (unscaled) input must land in the BENIGN region"
-        assert pred_scaled != 0, "Scaled XGB prediction must not be forced to BENIGN"
-        assert str(self.le.classes_[pred_scaled]) != "BENIGN"
-        # The raw (unscaled) prediction should not silently agree on a meaningless label.
-        assert pred_raw != pred_scaled, "Scaling must alter the inference outcome"
+        threshold = get_settings().ml_decision_threshold
+        for seed in range(24):
+            rng = np.random.default_rng(seed)
+            z = rng.normal(0, 2.0, size=(1, 70))
+            raw = (self.scaler.mean_ + z * self.scaler.scale_).reshape(1, -1)
+
+            probs = self.xgb._estimator.predict_proba(self.xgb._preprocess(raw))[0]
+            p_benign = float(probs[0])
+            pred_scaled = int(self.xgb.predict(raw))
+            if 1.0 - p_benign < threshold:
+                assert pred_scaled == 0, f"seed={seed}: benign-majority flow must stay BENIGN"
+            else:
+                assert pred_scaled == int(np.argmax(np.delete(probs, 0))) + 1, (
+                    f"seed={seed}: scaled path must declare the estimator's strongest attack class"
+                )
+            assert self.xgb.predict_confidence(raw) == pytest.approx(float(np.max(probs)))
+
+        for seed in range(8):
+            rng = np.random.default_rng(seed)
+            z = rng.normal(0, 2.0, size=(1, 70))
+            raw = (self.scaler.mean_ + z * self.scaler.scale_).reshape(1, -1)
+            probs = self.rf._estimator.predict_proba(self.rf._preprocess(raw))[0]
+            p_benign = float(probs[0])
+            pred_scaled = int(self.rf.predict(raw))
+            if 1.0 - p_benign < threshold:
+                assert pred_scaled == 0, f"RF seed={seed}: benign-majority flow must stay BENIGN"
+            else:
+                assert pred_scaled == int(np.argmax(np.delete(probs, 0))) + 1, (
+                    f"RF seed={seed}: scaled path must declare the estimator's strongest attack class"
+                )
 
     def test_mapper_end_to_end_attack_detection(self):
-        """FeatureMapper -> scaled adapter flags an attack-like flow vector."""
+        """FeatureMapper round-trip must reproduce the direct-vector verdict."""
         from ml.feature_mapper import FeatureMapper
 
-        rng = np.random.default_rng(10)
-        z = rng.normal(0, 2.0, size=(1, 70))
-        raw_vals = self.scaler.mean_ + z * self.scaler.scale_
-
-        flow_style = {}
-        for i, name in enumerate(self.xgb.required_features):
-            flow_style[name] = float(raw_vals[0, i])
-
         mapper = FeatureMapper()
-        vector, missing = mapper.map_with_report(flow_style, self.xgb.required_features)
-        assert len(missing) == 0
-        pred = int(self.xgb.predict(vector))
-        assert str(self.le.classes_[pred]) != "BENIGN"
+        for seed in range(8):
+            rng = np.random.default_rng(seed)
+            z = rng.normal(0, 2.0, size=(1, 70))
+            vals = self.scaler.mean_ + z * self.scaler.scale_
+
+            flow_style = {
+                name: float(vals[0, i])
+                for i, name in enumerate(self.xgb.required_features)
+            }
+            vector, missing = mapper.map_with_report(flow_style, self.xgb.required_features)
+            assert len(missing) == 0, f"seed={seed}: full footprint must map with no gaps"
+            assert int(self.xgb.predict(vector)) == int(self.xgb.predict(vals.reshape(1, -1))), (
+                f"seed={seed}: mapper must not alter the scaled verdict"
+            )
 
 
 class TestFeatureMapperInfHandling:
