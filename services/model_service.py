@@ -211,13 +211,13 @@ class ModelService:
                 payload = _json.loads(sidecar.read_text(encoding="utf-8"))
                 classes = payload.get("classes")
                 if classes:
-                    return [str(c) for c in classes]
+                    return [str(c).replace("\ufffd", "/") for c in classes]
         except Exception:  # noqa: BLE001 - best-effort; fall back to the shared encoder
             logger.warning("Failed to read per-model classes for id=%s; falling back to global encoder.", model_id)
 
         encoder = self.get_label_encoder(model_id)
         if encoder is not None and hasattr(encoder, "classes_"):
-            return [str(c) for c in encoder.classes_]
+            return [str(c).replace("\ufffd", "/") for c in encoder.classes_]
         return None
 
     def resolve_macro_model_id(self, configured_macro_model_id: int | None = None) -> int | None:

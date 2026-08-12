@@ -99,10 +99,16 @@ class AlertEngine:
             return None
 
         # ── Blacklist handling: force alert regardless of model prediction ──
+        # The model's attack classification is preserved as the alert threat type so
+        # operators see the ACTUAL attack (e.g. "SYN Flood"), never a generic label.
+        # The block context (IP blocked + reason) travels in the notification reason.
         is_blacklisted = detection.is_blacklisted or (detection.source_ip and self._ip_lists.is_blacklisted(detection.source_ip))
         if is_blacklisted:
-            threat_type = "Blocked IP Attempting Access"
-            logger.warning("Blacklisted IP %s attempting network access — immediate alert.", source_ip)
+            if detection.prediction == 0 or not threat_type or threat_type == DEFAULT_THREAT_TYPE:
+                threat_type = "Blocked IP Attempting Access"
+                logger.warning("Blacklisted IP %s attempting network access — immediate alert.", source_ip)
+            else:
+                logger.warning("Blacklisted IP %s flagged as %s — immediate alert.", source_ip, threat_type)
 
         # ── If prediction is benign and not blacklisted, no alert ──
         if detection.prediction == 0 and not is_blacklisted:
@@ -133,6 +139,8 @@ class AlertEngine:
                     alert_id=existing.id,
                     destination_ip=detection.destination_ip,
                     source_type=getattr(detection, "source_type", None),
+                    severity=detection.severity or None,
+                    reason=(detection.attack_reason if is_blacklisted else None),
                 )
 
             return existing
@@ -152,6 +160,8 @@ class AlertEngine:
             alert_id=alert.id,
             destination_ip=detection.destination_ip,
             source_type=detection.source_type,
+            severity=detection.severity or None,
+            reason=(detection.attack_reason if is_blacklisted else None),
         )
 
         if sent:

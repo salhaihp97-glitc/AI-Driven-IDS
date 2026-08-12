@@ -143,6 +143,20 @@ class IpListService:
         """
         return self._blacklist.exists(ip_address)
 
+    def get_blacklist_entry(self, ip_address: str) -> BlacklistIP | None:
+        """
+        Returns the persistent blacklist record for *ip_address* — including the stored
+        block reason — or ``None`` when the IP is not currently blocked.
+        """
+        return self._blacklist.get_by_ip(ip_address)
+
+    def get_whitelist_entry(self, ip_address: str) -> WhitelistIP | None:
+        """
+        Returns the persistent whitelist record for *ip_address* — including the stored
+        trust reason — or ``None`` when the IP is not currently whitelisted.
+        """
+        return self._whitelist.get_by_ip(ip_address)
+
     def list_blacklist(self) -> list[BlacklistIP]:
         """
         Retrieves the complete set of all active explicitly blocked network entities.
