@@ -48,6 +48,7 @@ logger = get_logger("capture.macro_flow_assembler")
 # Reducer kinds
 # ---------------------------------------------------------------------------
 
+
 class ReducerKind(Enum):
     """Semantic aggregation operation dispatched for a feature key."""
     IDENTITY = "identity"   # meta / key-ish fields (ports, protocol) kept from first member
