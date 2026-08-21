@@ -5,7 +5,7 @@
 # === Core Foundation Layer (Security & Configurations) ===
 bcrypt>=4.2.0
 python-dotenv>=1.0.1
-
+ 
 
 # === Web UI Framework ===
 # Standard enterprise framework supporting full responsive layout configurations
