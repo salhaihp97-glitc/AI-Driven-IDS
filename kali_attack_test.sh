@@ -13,7 +13,7 @@ COUNT=60000               # total hping3 packets per flood
 
 LOG="attack_test_output.txt"
 : > "$LOG"
-
+ 
 hr() { printf '============================================\n' | tee -a "$LOG"; }
 ok()  { printf '>>> %s [OK]\n' "$1" | tee -a "$LOG"; }
 skip(){ printf '!!! %s [SKIPPED - tool missing]\n' "$1" | tee -a "$LOG"; }
